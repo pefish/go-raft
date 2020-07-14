@@ -8,8 +8,8 @@ import (
 	"io/ioutil"
 	"os"
 
-	"code.google.com/p/gogoprotobuf/proto"
-	"github.com/goraft/raft/protobuf"
+	"github.com/gogo/protobuf/proto"
+	"github.com/pefish/go-raft/protobuf"
 )
 
 // Snapshot represents an in-memory representation of the current state of the system.
@@ -24,7 +24,7 @@ type Snapshot struct {
 }
 
 // The request sent to a server to start from the snapshot.
-type SnapshotRecoveryRequest struct {
+type SnapshotRecoveryRequest struct {  // 让邻节点执行快照，心跳中会被leader反复发送请求
 	LeaderName string
 	LastIndex  uint64
 	LastTerm   uint64
@@ -40,7 +40,7 @@ type SnapshotRecoveryResponse struct {
 }
 
 // The request sent to a server to start from the snapshot.
-type SnapshotRequest struct {
+type SnapshotRequest struct {  // 让邻节点准备好快照。心跳中由leader一直发送（每次心跳发现没有可同步的log就会发这个请求）
 	LeaderName string
 	LastIndex  uint64
 	LastTerm   uint64

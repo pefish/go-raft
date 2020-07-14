@@ -115,9 +115,9 @@ type server struct {
 	state       string
 	transporter Transporter
 	context     interface{}
-	currentTerm uint64
+	currentTerm uint64  // 保存当前任期。只要leader不变，这个值就不变
 
-	votedFor   string
+	votedFor   string  // 记录本节点选举票投给谁了
 	log        *Log
 	leader     string
 	peers      map[string]*Peer
@@ -191,7 +191,7 @@ func NewServer(name string, path string, transporter Transporter, stateMachine S
 	// Setup apply function.
 	s.log.ApplyFunc = func(e *LogEntry, c Command) (interface{}, error) {
 		// Dispatch commit event.
-		s.DispatchEvent(newEvent(CommitEventType, e, nil))
+		s.DispatchEvent(newEvent(CommitEventType, e, nil))  // 发送log提交事件
 
 		// Apply command to the state machine.
 		switch c := c.(type) {
@@ -295,15 +295,15 @@ func (s *server) setState(state string) {
 
 	// Update state and leader.
 	s.state = state
-	if state == Leader {
-		s.leader = s.Name()
-		s.syncedPeer = make(map[string]bool)
+	if state == Leader {  // 如果是将自己设置为leader
+		s.leader = s.Name()  // 则设置leader变量
+		s.syncedPeer = make(map[string]bool)  // 重置syncedPeer
 	}
 
 	// Dispatch state and leader change events.
-	s.DispatchEvent(newEvent(StateChangeEventType, s.state, prevState))
+	s.DispatchEvent(newEvent(StateChangeEventType, s.state, prevState))  // 发送状态改变的事件
 
-	if prevLeader != s.leader {
+	if prevLeader != s.leader {  // 如果状态改变前的leader不是现在的leader，说明自己被设置为了leader，则发送leader改变的事件
 		s.DispatchEvent(newEvent(LeaderChangeEventType, s.leader, prevLeader))
 	}
 }
@@ -423,7 +423,7 @@ func (s *server) SetHeartbeatInterval(duration time.Duration) {
 //--------------------------------------
 
 // Reg the NOPCommand
-func init() {
+func init() {  // 包初始化
 	RegisterCommand(&NOPCommand{})
 	RegisterCommand(&DefaultJoinCommand{})
 	RegisterCommand(&DefaultLeaveCommand{})
@@ -440,20 +440,20 @@ func (s *server) Start() error {  // raft协议的启动位置
 		return fmt.Errorf("raft.Server: Server already running[%v]", s.state)
 	}
 
-	if err := s.Init(); err != nil {
+	if err := s.Init(); err != nil {  // server初始化
 		return err
 	}
 
 	// stopped needs to be allocated each time server starts
 	// because it is closed at `Stop`.
 	s.stopped = make(chan bool)
-	s.setState(Follower)
+	s.setState(Follower)  // 将自己设置为follower
 
 	// If no log entries exist then
 	// 1. wait for AEs from another node
 	// 2. wait for self-join command
 	// to set itself promotable
-	if !s.promotable() {
+	if !s.promotable() {  // 如果一个log entry都没有，啥也没做
 		s.debugln("start as a new raft server")
 
 		// If log entries exist then allow promotion to candidate
@@ -467,7 +467,7 @@ func (s *server) Start() error {  // raft协议的启动位置
 	s.routineGroup.Add(1)
 	go func() {
 		defer s.routineGroup.Done()
-		s.loop()
+		s.loop()  // 使用协程开启循环
 	}()
 
 	return nil
@@ -490,25 +490,25 @@ func (s *server) Init() error {
 	}
 
 	// Create snapshot directory if it does not exist
-	err := os.Mkdir(path.Join(s.path, "snapshot"), 0700)
+	err := os.Mkdir(path.Join(s.path, "snapshot"), 0700)  // 创建snapshot目录
 	if err != nil && !os.IsExist(err) {
 		s.debugln("raft: Snapshot dir error: ", err)
 		return fmt.Errorf("raft: Initialization error: %s", err)
 	}
 
-	if err := s.readConf(); err != nil {
+	if err := s.readConf(); err != nil {  // 读出配置文件中CommitIndex配置，放入log模块
 		s.debugln("raft: Conf file error: ", err)
 		return fmt.Errorf("raft: Initialization error: %s", err)
 	}
 
 	// Initialize the log and load it up.
-	if err := s.log.open(s.LogPath()); err != nil {
+	if err := s.log.open(s.LogPath()); err != nil {  // 加载log文件
 		s.debugln("raft: Log error: ", err)
 		return fmt.Errorf("raft: Initialization error: %s", err)
 	}
 
 	// Update the term to the last term in the log.
-	_, s.currentTerm = s.log.lastInfo()
+	_, s.currentTerm = s.log.lastInfo()  // currentTerm设置为最后一个log entry的term
 
 	s.state = Initialized
 	return nil
@@ -593,7 +593,7 @@ func (s *server) updateCurrentTerm(term uint64, leaderName string) {
 //                    |            new leader |                                     |
 //                    |_______________________|____________________________________ |
 // The main event loop for the server
-func (s *server) loop() {
+func (s *server) loop() {  // 主循环就是个状态机
 	defer s.debugln("server.loop.end")
 
 	state := s.State()
@@ -665,10 +665,10 @@ func (s *server) sendAsync(value interface{}) {
 // Converts to candidate if election timeout elapses without either:
 //   1.Receiving valid AppendEntries RPC, or
 //   2.Granting vote to candidate
-func (s *server) followerLoop() {
+func (s *server) followerLoop() {  // 如果本节点的状态是随从，则一直执行这里(这里就是一个事件循环)
 	since := time.Now()
-	electionTimeout := s.ElectionTimeout()
-	timeoutChan := afterBetween(s.ElectionTimeout(), s.ElectionTimeout()*2)
+	electionTimeout := s.ElectionTimeout()  // 取出选举超时时间
+	timeoutChan := afterBetween(s.ElectionTimeout(), s.ElectionTimeout()*2)  // 从[选举超时时间,2倍选举超时时间)中随机选择一个时间
 
 	for s.State() == Follower {
 		var err error
@@ -678,28 +678,28 @@ func (s *server) followerLoop() {
 			s.setState(Stopped)
 			return
 
-		case e := <-s.c:
+		case e := <-s.c:  // 接收事件
 			switch req := e.target.(type) {
-			case JoinCommand:
+			case JoinCommand:  // "加入命令"的事件
 				//If no log entries exist and a self-join command is issued
 				//then immediately become leader and commit entry.
 				if s.log.currentIndex() == 0 && req.NodeName() == s.Name() {
 					s.debugln("selfjoin and promote to leader")
 					s.setState(Leader)
-					s.processCommand(req, e)
+					s.processCommand(req, e)  // 加入一个entry，但未提交，需要等待投票
 				} else {
 					err = NotLeaderError
 				}
-			case *AppendEntriesRequest:
+			case *AppendEntriesRequest:  // leader发出的附加entry的请求
 				// If heartbeats get too close to the election timeout then send an event.
 				elapsedTime := time.Now().Sub(since)
 				if elapsedTime > time.Duration(float64(electionTimeout)*ElectionTimeoutThresholdPercent) {
 					s.DispatchEvent(newEvent(ElectionTimeoutThresholdEventType, elapsedTime, nil))
 				}
 				e.returnValue, update = s.processAppendEntriesRequest(req)
-			case *RequestVoteRequest:
+			case *RequestVoteRequest:  // 候选人发出的投票请求
 				e.returnValue, update = s.processRequestVoteRequest(req)
-			case *SnapshotRequest:
+			case *SnapshotRequest:  // 处理快栈请求
 				e.returnValue = s.processSnapshotRequest(req)
 			default:
 				err = NotLeaderError
@@ -707,9 +707,9 @@ func (s *server) followerLoop() {
 			// Callback to event.
 			e.c <- err
 
-		case <-timeoutChan:
+		case <-timeoutChan:  // 作为follower没有收到任何事件，超时了，就把自己设置为候选人
 			// only allow synced follower to promote to candidate
-			if s.promotable() {
+			if s.promotable() { // 只有log不为空的才有资格成为候选人
 				s.setState(Candidate)
 			} else {
 				update = true
@@ -744,12 +744,12 @@ func (s *server) candidateLoop() {
 	for s.State() == Candidate {
 		if doVote {
 			// Increment current term, vote for self.
-			s.currentTerm++
-			s.votedFor = s.name
+			s.currentTerm++  // 开启新一轮投票
+			s.votedFor = s.name  // 投给自己
 
 			// Send RequestVote RPCs to all other servers.
 			respChan = make(chan *RequestVoteResponse, len(s.peers))
-			for _, peer := range s.peers {
+			for _, peer := range s.peers {  // 向所有邻节点发送"请求投票"的请求
 				s.routineGroup.Add(1)
 				go func(peer *Peer) {
 					defer s.routineGroup.Done()
@@ -762,14 +762,14 @@ func (s *server) candidateLoop() {
 			//   * AppendEntries RPC received from new leader: step down.
 			//   * Election timeout elapses without election resolution: increment term, start new election
 			//   * Discover higher term: step down (§5.1)
-			votesGranted = 1
+			votesGranted = 1  // 被多少个节点赞同（这里是自己一票）
 			timeoutChan = afterBetween(s.ElectionTimeout(), s.ElectionTimeout()*2)
 			doVote = false
 		}
 
 		// If we received enough votes then stop waiting for more votes.
 		// And return from the candidate loop
-		if votesGranted == s.QuorumSize() {
+		if votesGranted == s.QuorumSize() {  // 如果为自己投票的节点数达到 邻节点个数/2 + 1 个，则自己成功当选leader，退出选举过程
 			s.debugln("server.candidate.recv.enough.votes")
 			s.setState(Leader)
 			return
@@ -781,41 +781,41 @@ func (s *server) candidateLoop() {
 			s.setState(Stopped)
 			return
 
-		case resp := <-respChan:
+		case resp := <-respChan:  // 监听邻节点的投票回复
 			if success := s.processVoteResponse(resp); success {
 				s.debugln("server.candidate.vote.granted: ", votesGranted)
-				votesGranted++
+				votesGranted++  // 如果节点投票了，则给自己加一票
 			}
 
-		case e := <-s.c:
+		case e := <-s.c:  // 照样监听请求
 			var err error
 			switch req := e.target.(type) {
 			case Command:
 				err = NotLeaderError
-			case *AppendEntriesRequest:
+			case *AppendEntriesRequest:  // 如果收到leader发来的请求附加log的消息，说明leader已经被别人当选了，自己会被降为随从
 				e.returnValue, _ = s.processAppendEntriesRequest(req)
-			case *RequestVoteRequest:
+			case *RequestVoteRequest:  // 如果这里收到其他节点的投票请求，当然不投给他了，已经投给自己了
 				e.returnValue, _ = s.processRequestVoteRequest(req)
 			}
 
 			// Callback to event.
 			e.c <- err
 
-		case <-timeoutChan:
+		case <-timeoutChan:  // 选举超时，则重新发起选举
 			doVote = true
 		}
 	}
 }
 
 // The event loop that is run when the server is in a Leader state.
-func (s *server) leaderLoop() {
+func (s *server) leaderLoop() {  // 自己当选了leader，就执行这个函数
 	logIndex, _ := s.log.lastInfo()
 
 	// Update the peers prevLogIndex to leader's lastLogIndex and start heartbeat.
 	s.debugln("leaderLoop.set.PrevIndex to ", logIndex)
 	for _, peer := range s.peers {
-		peer.setPrevLogIndex(logIndex)
-		peer.startHeartbeat()
+		peer.setPrevLogIndex(logIndex)  // 设置每个peer的上一个log entry的index
+		peer.startHeartbeat()  // 每个peer一个协程进行心跳，心跳中会持续发送"附加log"的请求
 	}
 
 	// Commit a NOP after the server becomes leader. From the Raft paper:
@@ -825,7 +825,7 @@ func (s *server) leaderLoop() {
 	s.routineGroup.Add(1)
 	go func() {
 		defer s.routineGroup.Done()
-		s.Do(NOPCommand{})
+		s.Do(NOPCommand{})  // 每次新leader当选就发送一个空命令给自己，自己记入log
 	}()
 
 	// Begin to collect response from followers
@@ -861,7 +861,7 @@ func (s *server) leaderLoop() {
 	s.syncedPeer = nil
 }
 
-func (s *server) snapshotLoop() {
+func (s *server) snapshotLoop() {  // 当本节点处于快照状态，就会做这个函数
 	for s.State() == Snapshotting {
 		var err error
 		select {
@@ -902,7 +902,7 @@ func (s *server) processCommand(command Command, e *ev) {
 	s.debugln("server.command.process")
 
 	// Create an entry for the command in the log.
-	entry, err := s.log.createEntry(s.currentTerm, command, e)
+	entry, err := s.log.createEntry(s.currentTerm, command, e)  // 创建一个log entry
 
 	if err != nil {
 		s.debugln("server.command.log.entry.error:", err)
@@ -910,14 +910,14 @@ func (s *server) processCommand(command Command, e *ev) {
 		return
 	}
 
-	if err := s.log.appendEntry(entry); err != nil {
+	if err := s.log.appendEntry(entry); err != nil {  // 加入log entry，提交点不变
 		s.debugln("server.command.log.error:", err)
 		e.c <- err
 		return
 	}
 
-	s.syncedPeer[s.Name()] = true
-	if len(s.peers) == 0 {
+	s.syncedPeer[s.Name()] = true  // 设置自己已经赞同
+	if len(s.peers) == 0 {  // 如果一个邻节点都没有，则直接提交
 		commitIndex := s.log.currentIndex()
 		s.log.setCommitIndex(commitIndex)
 		s.debugln("commit index ", commitIndex)
@@ -936,45 +936,45 @@ func (s *server) AppendEntries(req *AppendEntriesRequest) *AppendEntriesResponse
 }
 
 // Processes the "append entries" request.
-func (s *server) processAppendEntriesRequest(req *AppendEntriesRequest) (*AppendEntriesResponse, bool) {
+func (s *server) processAppendEntriesRequest(req *AppendEntriesRequest) (*AppendEntriesResponse, bool) {  // 处理附加entry请求（由leader发出）
 	s.traceln("server.ae.process")
 
-	if req.Term < s.currentTerm {
+	if req.Term < s.currentTerm {  // 如果任期小于当前任期，则返回错误回复
 		s.debugln("server.ae.error: stale term")
 		return newAppendEntriesResponse(s.currentTerm, false, s.log.currentIndex(), s.log.CommitIndex()), false
 	}
 
-	if req.Term == s.currentTerm {
-		_assert(s.State() != Leader, "leader.elected.at.same.term.%d\n", s.currentTerm)
+	if req.Term == s.currentTerm { // 如果就是当前任期
+		_assert(s.State() != Leader, "leader.elected.at.same.term.%d\n", s.currentTerm)  // 本节点不能也是leader，否则一个任期内存在了两个leader
 
 		// step-down to follower when it is a candidate
-		if s.state == Candidate {
+		if s.state == Candidate {  // 如果本节点是候选人，则降为随从
 			// change state to follower
 			s.setState(Follower)
 		}
 
 		// discover new leader when candidate
 		// save leader name when follower
-		s.leader = req.LeaderName
-	} else {
+		s.leader = req.LeaderName  // 承认新leader
+	} else {  // 如果大于本节点记录的任期，则更新任期以及leader
 		// Update term and leader.
 		s.updateCurrentTerm(req.Term, req.LeaderName)
 	}
 
 	// Reject if log doesn't contain a matching previous entry.
-	if err := s.log.truncate(req.PrevLogIndex, req.PrevLogTerm); err != nil {
+	if err := s.log.truncate(req.PrevLogIndex, req.PrevLogTerm); err != nil {  // 消息中的上一个log index以及term往后的未提交的log，都清除掉。就是回滚
 		s.debugln("server.ae.truncate.error: ", err)
 		return newAppendEntriesResponse(s.currentTerm, false, s.log.currentIndex(), s.log.CommitIndex()), true
 	}
 
 	// Append entries to the log.
-	if err := s.log.appendEntries(req.Entries); err != nil {
+	if err := s.log.appendEntries(req.Entries); err != nil {  // 附加所有请求的entry
 		s.debugln("server.ae.append.error: ", err)
 		return newAppendEntriesResponse(s.currentTerm, false, s.log.currentIndex(), s.log.CommitIndex()), true
 	}
 
 	// Commit up to the commit index.
-	if err := s.log.setCommitIndex(req.CommitIndex); err != nil {
+	if err := s.log.setCommitIndex(req.CommitIndex); err != nil {  // 请求中的提交点往前的都提交
 		s.debugln("server.ae.commit.error: ", err)
 		return newAppendEntriesResponse(s.currentTerm, false, s.log.currentIndex(), s.log.CommitIndex()), true
 	}
@@ -1063,7 +1063,7 @@ func (s *server) RequestVote(req *RequestVoteRequest) *RequestVoteResponse {
 }
 
 // Processes a "request vote" request.
-func (s *server) processRequestVoteRequest(req *RequestVoteRequest) (*RequestVoteResponse, bool) {
+func (s *server) processRequestVoteRequest(req *RequestVoteRequest) (*RequestVoteResponse, bool) {  // 处理候选人发出的请求投票的请求
 
 	// If the request is coming from an old term then reject it.
 	if req.Term < s.Term() {
@@ -1074,9 +1074,9 @@ func (s *server) processRequestVoteRequest(req *RequestVoteRequest) (*RequestVot
 	// If the term of the request peer is larger than this node, update the term
 	// If the term is equal and we've already voted for a different candidate then
 	// don't vote for this candidate.
-	if req.Term > s.Term() {
+	if req.Term > s.Term() {  // 请求的任期大于当前任期，则更新任期，leader设置为空（因为这是投票请求，说明leader未产生）
 		s.updateCurrentTerm(req.Term, "")
-	} else if s.votedFor != "" && s.votedFor != req.CandidateName {
+	} else if s.votedFor != "" && s.votedFor != req.CandidateName {  // 如果本节点已经投票了而且没有投给这个节点，则返回不投票
 		s.debugln("server.deny.vote: cause duplicate vote: ", req.CandidateName,
 			" already vote for ", s.votedFor)
 		return newRequestVoteResponse(s.currentTerm, false), false
@@ -1084,7 +1084,7 @@ func (s *server) processRequestVoteRequest(req *RequestVoteRequest) (*RequestVot
 
 	// If the candidate's log is not at least as up-to-date as our last log then don't vote.
 	lastIndex, lastTerm := s.log.lastInfo()
-	if lastIndex > req.LastLogIndex || lastTerm > req.LastLogTerm {
+	if lastIndex > req.LastLogIndex || lastTerm > req.LastLogTerm {  // 如果这个候选人的最新log还没本节点新，则不投票
 		s.debugln("server.deny.vote: cause out of date log: ", req.CandidateName,
 			"Index :[", lastIndex, "]", " [", req.LastLogIndex, "]",
 			"Term :[", lastTerm, "]", " [", req.LastLogTerm, "]")
@@ -1197,7 +1197,7 @@ func (s *server) TakeSnapshot() error {
 		return nil
 	}
 
-	path := s.SnapshotPath(lastIndex, lastTerm)
+	path := s.SnapshotPath(lastIndex, lastTerm)  // 获取快照文件名
 	// Attach snapshot to pending snapshot and save it to disk.
 	s.pendingSnapshot = &Snapshot{lastIndex, lastTerm, nil, nil, path}
 
@@ -1275,7 +1275,7 @@ func (s *server) processSnapshotRequest(req *SnapshotRequest) *SnapshotResponse 
 	}
 
 	// Update state.
-	s.setState(Snapshotting)
+	s.setState(Snapshotting)  // 改一下本节点的状态，本节点就会转向去做相应事情(监听leader的执行快照请求)。这里表示本节点已经准备好接收执行快照请求
 
 	return newSnapshotResponse(true)
 }
@@ -1304,10 +1304,10 @@ func (s *server) processSnapshotRecoveryRequest(req *SnapshotRecoveryRequest) *S
 
 	// Create local snapshot.
 	s.pendingSnapshot = &Snapshot{req.LastIndex, req.LastTerm, req.Peers, req.State, s.SnapshotPath(req.LastIndex, req.LastTerm)}
-	s.saveSnapshot()
+	s.saveSnapshot()  // 保存快照
 
 	// Clear the previous log entries.
-	s.log.compact(req.LastIndex, req.LastTerm)
+	s.log.compact(req.LastIndex, req.LastTerm)  // 移除log文件中快照点之前的所有已提交的entry（这些entry会被丢弃，因为已经提交了，没用了），log文件将会变小，防止log文件无限制变大
 
 	return newSnapshotRecoveryResponse(req.LastTerm, true, req.LastIndex)
 }

@@ -160,7 +160,7 @@ func (p *Peer) heartbeat(c chan bool) {
 
 		case <-ticker:
 			start := time.Now()
-			p.flush()
+			p.flush()  // 每次心跳都flush
 			duration := time.Now().Sub(start)
 			p.server.DispatchEvent(newEvent(HeartbeatEventType, duration, nil))
 		}
@@ -172,12 +172,12 @@ func (p *Peer) flush() {
 	prevLogIndex := p.getPrevLogIndex()
 	term := p.server.currentTerm
 
-	entries, prevLogTerm := p.server.log.getEntriesAfter(prevLogIndex, p.server.maxLogEntriesPerRequest)
+	entries, prevLogTerm := p.server.log.getEntriesAfter(prevLogIndex, p.server.maxLogEntriesPerRequest)  // 取出上一个entry到现在的所有entry（有limit）
 
 	if entries != nil {
-		p.sendAppendEntriesRequest(newAppendEntriesRequest(term, prevLogIndex, prevLogTerm, p.server.log.CommitIndex(), p.server.name, entries))
+		p.sendAppendEntriesRequest(newAppendEntriesRequest(term, prevLogIndex, prevLogTerm, p.server.log.CommitIndex(), p.server.name, entries))  // 向peer发送请求附加的请求
 	} else {
-		p.sendSnapshotRequest(newSnapshotRequest(p.server.name, p.server.snapshot))
+		p.sendSnapshotRequest(newSnapshotRequest(p.server.name, p.server.snapshot))  // 如果没有entry，则发送准备快照的请求
 	}
 }
 
@@ -270,7 +270,7 @@ func (p *Peer) sendSnapshotRequest(req *SnapshotRequest) {
 	// Send it the snapshot!
 	p.setLastActivity(time.Now())
 
-	if resp.Success {
+	if resp.Success {  // 如果节点成功进入快照状态，则发送执行快照请求
 		p.sendSnapshotRecoveryRequest()
 	} else {
 		debugln("peer.snap.failed: ", p.Name)

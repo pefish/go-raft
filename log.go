@@ -8,7 +8,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/goraft/raft/protobuf"
+	"github.com/pefish/go-raft/protobuf"
 )
 
 //------------------------------------------------------------------------------
@@ -19,11 +19,11 @@ import (
 
 // A log is a collection of log entries that are persisted to durable storage.
 type Log struct {
-	ApplyFunc   func(*LogEntry, Command) (interface{}, error)
+	ApplyFunc   func(*LogEntry, Command) (interface{}, error)  // 已提交的entry中的命令都会被这函数执行
 	file        *os.File
 	path        string
 	entries     []*LogEntry
-	commitIndex uint64
+	commitIndex uint64  // 表示提交点
 	mutex       sync.RWMutex
 	startIndex  uint64 // the index before the first entry in the Log entries
 	startTerm   uint64
@@ -158,7 +158,7 @@ func (l *Log) open(path string) error {
 	debugln("log.open.exist ", path)
 
 	// Read the file and decode entries.
-	for {
+	for {  // 读出log文件中所有的log entries（log entry格式是: 4字节（数据大小）\ 数据）
 		// Instantiate log entry and decode into it.
 		entry, _ := newLogEntry(l, nil, 0, 0, nil)
 		entry.Position, _ = l.file.Seek(0, os.SEEK_CUR)
@@ -177,7 +177,7 @@ func (l *Log) open(path string) error {
 		if entry.Index() > l.startIndex {
 			// Append entry.
 			l.entries = append(l.entries, entry)
-			if entry.Index() <= l.commitIndex {
+			if entry.Index() <= l.commitIndex {  // 如果这个entry的索引<=提交点(提交点前面在配置文件中读出来了)，则要执行这个entry中的命令
 				command, err := newCommand(entry.CommandName(), entry.Command())
 				if err != nil {
 					continue
@@ -333,7 +333,7 @@ func (l *Log) setCommitIndex(index uint64) error {
 
 	// this is not error any more after limited the number of sending entries
 	// commit up to what we already have
-	if index > l.startIndex+uint64(len(l.entries)) {
+	if index > l.startIndex+uint64(len(l.entries)) {  // 如果提交点设置过大，则纠正为最新的index
 		debugln("raft.Log: Commit index", index, "set back to ", len(l.entries))
 		index = l.startIndex + uint64(len(l.entries))
 	}
@@ -353,12 +353,12 @@ func (l *Log) setCommitIndex(index uint64) error {
 	// when new leader 3 send heartbeat with committed index = 0 to follower 2,
 	// follower 2 should reply success and let leader 3 update the committed index to 80
 
-	if index < l.commitIndex {
+	if index < l.commitIndex {  // 如果提交点设置成比当前值还小，则什么都不做
 		return nil
 	}
 
 	// Find all entries whose index is between the previous index and the current index.
-	for i := l.commitIndex + 1; i <= index; i++ {
+	for i := l.commitIndex + 1; i <= index; i++ {  // 找到 之前的提交点与现在设置的提交点 之间的所有未提交的entry
 		entryIndex := i - 1 - l.startIndex
 		entry := l.entries[entryIndex]
 
@@ -372,10 +372,10 @@ func (l *Log) setCommitIndex(index uint64) error {
 		}
 
 		// Apply the changes to the state machine and store the error code.
-		returnValue, err := l.ApplyFunc(entry, command)
+		returnValue, err := l.ApplyFunc(entry, command)  // 执行entry中命令
 
 		debugf("setCommitIndex.set.result index: %v, entries index: %v", i, entryIndex)
-		if entry.event != nil {
+		if entry.event != nil {  // 如果entry中附带事件的话，返回值以及错误信息都返回给事件
 			entry.event.returnValue = returnValue
 			entry.event.c <- err
 		}
@@ -598,7 +598,7 @@ func (l *Log) compact(index uint64, term uint64) error {
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
+	for _, entry := range entries {  // 保存快照点后面所有log到一个新的log文件
 		position, _ := l.file.Seek(0, os.SEEK_CUR)
 		entry.Position = position
 
@@ -613,7 +613,7 @@ func (l *Log) compact(index uint64, term uint64) error {
 	old_file := l.file
 
 	// rename the new log file
-	err = os.Rename(new_file_path, l.path)
+	err = os.Rename(new_file_path, l.path)  // 重命名新文件，替代log文件
 	if err != nil {
 		file.Close()
 		os.Remove(new_file_path)

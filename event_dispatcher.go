@@ -62,7 +62,7 @@ func (d *eventDispatcher) DispatchEvent(e Event) {
 	}
 
 	// Dispatch the event to all listeners.
-	for _, l := range d.listeners[e.Type()] {
+	for _, l := range d.listeners[e.Type()] {  // 通知所有监听这个事件的监听者
 		l(e)
 	}
 }

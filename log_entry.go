@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/pefish/go-raft/protobuf"
 	"io"
 
-	"code.google.com/p/gogoprotobuf/proto"
-	"github.com/goraft/raft/protobuf"
+	"github.com/gogo/protobuf/proto"
 )
 
 // A log entry stores a single item in the log.
@@ -87,19 +87,19 @@ func (e *LogEntry) Encode(w io.Writer) (int, error) {
 func (e *LogEntry) Decode(r io.Reader) (int, error) {
 
 	var length int
-	_, err := fmt.Fscanf(r, "%8x\n", &length)
+	_, err := fmt.Fscanf(r, "%8x\n", &length)  // 先从字符串中读出一个4字节数字，表示后面内容的字节数。（"67klkl",读出的就是0x67, "121223233445567"读出的就是0x12122323）
 	if err != nil {
 		return -1, err
 	}
 
 	data := make([]byte, length)
-	_, err = io.ReadFull(r, data)
+	_, err = io.ReadFull(r, data)  // 接着读出数据（数据是protobuf格式）
 
 	if err != nil {
 		return -1, err
 	}
 
-	if err = proto.Unmarshal(data, e.pb); err != nil {
+	if err = proto.Unmarshal(data, e.pb); err != nil {  // 解码出数据
 		return -1, err
 	}
 

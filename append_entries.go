@@ -1,21 +1,21 @@
 package raft
 
 import (
+	"github.com/pefish/go-raft/protobuf"
 	"io"
 	"io/ioutil"
 
-	"code.google.com/p/gogoprotobuf/proto"
-	"github.com/goraft/raft/protobuf"
+	"github.com/gogo/protobuf/proto"
 )
 
 // The request sent to a server to append entries to the log.
 type AppendEntriesRequest struct {
-	Term         uint64
-	PrevLogIndex uint64
-	PrevLogTerm  uint64
-	CommitIndex  uint64
-	LeaderName   string
-	Entries      []*protobuf.LogEntry
+	Term         uint64  // 任期
+	PrevLogIndex uint64  // 上一个entry的index
+	PrevLogTerm  uint64  // 上一个entry的任期
+	CommitIndex  uint64  // 提交点
+	LeaderName   string  // leader名
+	Entries      []*protobuf.LogEntry  // 要附加的所有entry
 }
 
 // The response returned from a server appending entries to the log.
