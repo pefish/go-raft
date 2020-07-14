@@ -1,12 +1,29 @@
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package raft
 
 import (
+	"bytes"
 	"fmt"
-	"io"
-	"math/rand"
-	"os"
-	"time"
+
+	pb "github.com/pefish/go-raft/raftpb"
 )
+
+func (st StateType) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf("%q", st.String())), nil
+}
 
 // uint64Slice implements sort interface
 type uint64Slice []uint64
@@ -15,48 +32,85 @@ func (p uint64Slice) Len() int           { return len(p) }
 func (p uint64Slice) Less(i, j int) bool { return p[i] < p[j] }
 func (p uint64Slice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
-// WriteFile writes data to a file named by filename.
-// If the file does not exist, WriteFile creates it with permissions perm;
-// otherwise WriteFile truncates it before writing.
-// This is copied from ioutil.WriteFile with the addition of a Sync call to
-// ensure the data reaches the disk.
-func writeFileSynced(filename string, data []byte, perm os.FileMode) error {
-	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
+func min(a, b uint64) uint64 {
+	if a > b {
+		return b
 	}
-	defer f.Close() // Idempotent
-
-	n, err := f.Write(data)
-	if err == nil && n < len(data) {
-		return io.ErrShortWrite
-	} else if err != nil {
-		return err
-	}
-
-	if err = f.Sync(); err != nil {
-		return err
-	}
-
-	return f.Close()
+	return a
 }
 
-// Waits for a random time between two durations and sends the current time on
-// the returned channel.
-func afterBetween(min time.Duration, max time.Duration) <-chan time.Time {
-	rand := rand.New(rand.NewSource(time.Now().UnixNano()))
-	d, delta := min, (max - min)
-	if delta > 0 {
-		d += time.Duration(rand.Int63n(int64(delta)))
+func max(a, b uint64) uint64 {
+	if a > b {
+		return a
 	}
-	return time.After(d)
+	return b
 }
 
-// TODO(xiangli): Remove assertions when we reach version 1.0
+func IsLocalMsg(m pb.Message) bool {
+	return m.Type == pb.MsgHup || m.Type == pb.MsgBeat || m.Type == pb.MsgUnreachable || m.Type == pb.MsgSnapStatus || m.Type == pb.MsgCheckQuorum
+}
 
-// _assert will panic with a given formatted message if the given condition is false.
-func _assert(condition bool, msg string, v ...interface{}) {
-	if !condition {
-		panic(fmt.Sprintf("assertion failed: "+msg, v...))
+func IsResponseMsg(m pb.Message) bool {
+	return m.Type == pb.MsgAppResp || m.Type == pb.MsgVoteResp || m.Type == pb.MsgHeartbeatResp || m.Type == pb.MsgUnreachable
+}
+
+// EntryFormatter can be implemented by the application to provide human-readable formatting
+// of entry data. Nil is a valid EntryFormatter and will use a default format.
+type EntryFormatter func([]byte) string
+
+// DescribeMessage returns a concise human-readable description of a
+// Message for debugging.
+func DescribeMessage(m pb.Message, f EntryFormatter) string {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "%x->%x %v Term:%d Log:%d/%d", m.From, m.To, m.Type, m.Term, m.LogTerm, m.Index)
+	if m.Reject {
+		fmt.Fprintf(&buf, " Rejected")
+		if m.RejectHint != 0 {
+			fmt.Fprintf(&buf, "(Hint:%d)", m.RejectHint)
+		}
 	}
+	if m.Commit != 0 {
+		fmt.Fprintf(&buf, " Commit:%d", m.Commit)
+	}
+	if len(m.Entries) > 0 {
+		fmt.Fprintf(&buf, " Entries:[")
+		for i, e := range m.Entries {
+			if i != 0 {
+				buf.WriteString(", ")
+			}
+			buf.WriteString(DescribeEntry(e, f))
+		}
+		fmt.Fprintf(&buf, "]")
+	}
+	if !IsEmptySnap(m.Snapshot) {
+		fmt.Fprintf(&buf, " Snapshot:%v", m.Snapshot)
+	}
+	return buf.String()
+}
+
+// DescribeEntry returns a concise human-readable description of an
+// Entry for debugging.
+func DescribeEntry(e pb.Entry, f EntryFormatter) string {
+	var formatted string
+	if e.Type == pb.EntryNormal && f != nil {
+		formatted = f(e.Data)
+	} else {
+		formatted = fmt.Sprintf("%q", e.Data)
+	}
+	return fmt.Sprintf("%d/%d %s %s", e.Term, e.Index, e.Type, formatted)
+}
+
+func limitSize(ents []pb.Entry, maxSize uint64) []pb.Entry {
+	if len(ents) == 0 {
+		return ents
+	}
+	size := ents[0].Size()
+	var limit int
+	for limit = 1; limit < len(ents); limit++ {
+		size += ents[limit].Size()
+		if uint64(size) > maxSize {
+			break
+		}
+	}
+	return ents[:limit]
 }
