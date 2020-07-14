@@ -36,7 +36,7 @@ func (c *DefaultJoinCommand) CommandName() string {
 	return "raft:join"
 }
 
-func (c *DefaultJoinCommand) Apply(server Server) (interface{}, error) {
+func (c *DefaultJoinCommand) Apply(server Server) (interface{}, error) {  // DefaultJoinCommand命令的实际动作
 	err := server.AddPeer(c.Name, c.ConnectionString)
 
 	return []byte("join"), err

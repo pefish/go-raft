@@ -122,7 +122,7 @@ type server struct {
 	leader     string
 	peers      map[string]*Peer
 	mutex      sync.RWMutex
-	syncedPeer map[string]bool
+	syncedPeer map[string]bool  // 表示某批entries是否被某peer同步了
 
 	stopped           chan bool
 	c                 chan *ev
@@ -189,7 +189,7 @@ func NewServer(name string, path string, transporter Transporter, stateMachine S
 	s.eventDispatcher = newEventDispatcher(s)
 
 	// Setup apply function.
-	s.log.ApplyFunc = func(e *LogEntry, c Command) (interface{}, error) {
+	s.log.ApplyFunc = func(e *LogEntry, c Command) (interface{}, error) {  // 这是每个entry在达到共识而提交之后都会执行的函数，是由应用层设置的函数
 		// Dispatch commit event.
 		s.DispatchEvent(newEvent(CommitEventType, e, nil))  // 发送log提交事件
 
@@ -680,13 +680,13 @@ func (s *server) followerLoop() {  // 如果本节点的状态是随从，则一
 
 		case e := <-s.c:  // 接收事件
 			switch req := e.target.(type) {
-			case JoinCommand:  // "加入命令"的事件
+			case JoinCommand:  // "加入网络"的命令，一个节点在启动后，会给自己发一个"加入网络"的命令
 				//If no log entries exist and a self-join command is issued
 				//then immediately become leader and commit entry.
 				if s.log.currentIndex() == 0 && req.NodeName() == s.Name() {
 					s.debugln("selfjoin and promote to leader")
 					s.setState(Leader)
-					s.processCommand(req, e)  // 加入一个entry，但未提交，需要等待投票
+					s.processCommand(req, e)  // 加入一个entry，但未提交，需要等待peer同步
 				} else {
 					err = NotLeaderError
 				}
@@ -843,11 +843,11 @@ func (s *server) leaderLoop() {  // 自己当选了leader，就执行这个函�
 		case e := <-s.c:
 			switch req := e.target.(type) {
 			case Command:
-				s.processCommand(req, e)
+				s.processCommand(req, e)  // 每个命令都会被包装成log entry，自身append并给自己投票
 				continue
 			case *AppendEntriesRequest:
 				e.returnValue, _ = s.processAppendEntriesRequest(req)
-			case *AppendEntriesResponse:
+			case *AppendEntriesResponse:  // leader在发送完附加log请求后，会接收到恢复，会发送过来，这里会处理
 				s.processAppendEntriesResponse(req)
 			case *RequestVoteRequest:
 				e.returnValue, _ = s.processRequestVoteRequest(req)
@@ -916,8 +916,8 @@ func (s *server) processCommand(command Command, e *ev) {
 		return
 	}
 
-	s.syncedPeer[s.Name()] = true  // 设置自己已经赞同
-	if len(s.peers) == 0 {  // 如果一个邻节点都没有，则直接提交
+	s.syncedPeer[s.Name()] = true  // 自己先给自己投一票
+	if len(s.peers) == 0 {  // 如果一个邻节点都没有，则直接提交。新节点刚启动时会给自己发送一个加入网络的命令(命令中附带一个连接peer的字符串)，此时是独自一个节点，这里就会直接提交，然后调用这个应用层的回调，回调中执行这个命令的动作（动作就是add peer）
 		commitIndex := s.log.currentIndex()
 		s.log.setCommitIndex(commitIndex)
 		s.debugln("commit index ", commitIndex)
@@ -968,13 +968,13 @@ func (s *server) processAppendEntriesRequest(req *AppendEntriesRequest) (*Append
 	}
 
 	// Append entries to the log.
-	if err := s.log.appendEntries(req.Entries); err != nil {  // 附加所有请求的entry
+	if err := s.log.appendEntries(req.Entries); err != nil {  // 附加所有leader推送过来的entry，还没有提交
 		s.debugln("server.ae.append.error: ", err)
 		return newAppendEntriesResponse(s.currentTerm, false, s.log.currentIndex(), s.log.CommitIndex()), true
 	}
 
 	// Commit up to the commit index.
-	if err := s.log.setCommitIndex(req.CommitIndex); err != nil {  // 请求中的提交点往前的都提交
+	if err := s.log.setCommitIndex(req.CommitIndex); err != nil {  // leader给过来的提交点往前的都提交
 		s.debugln("server.ae.commit.error: ", err)
 		return newAppendEntriesResponse(s.currentTerm, false, s.log.currentIndex(), s.log.CommitIndex()), true
 	}
@@ -989,7 +989,7 @@ func (s *server) processAppendEntriesRequest(req *AppendEntriesRequest) (*Append
 // states are dropped.
 func (s *server) processAppendEntriesResponse(resp *AppendEntriesResponse) {
 	// If we find a higher term then change to a follower and exit.
-	if resp.Term() > s.Term() {
+	if resp.Term() > s.Term() {  // 如果发现某个回复的任期比自己记录的当前任期还大，则更新自己的任期，并且释放leader身份变成follower。新启动的节点在没有加入网络的时候，自己就成了leader，加入网络后，给其他节点发送append命令，收到回复发现任期比自己高，就会放弃leader
 		s.updateCurrentTerm(resp.Term(), "")
 		return
 	}
@@ -1006,7 +1006,7 @@ func (s *server) processAppendEntriesResponse(resp *AppendEntriesResponse) {
 	}
 
 	// Increment the commit count to make sure we have a quorum before committing.
-	if len(s.syncedPeer) < s.QuorumSize() {
+	if len(s.syncedPeer) < s.QuorumSize() {  // 如果已经同步的peer数量还不够，则直接返回
 		return
 	}
 
@@ -1024,8 +1024,8 @@ func (s *server) processAppendEntriesResponse(resp *AppendEntriesResponse) {
 
 	if commitIndex > committedIndex {
 		// leader needs to do a fsync before committing log entries
-		s.log.sync()
-		s.log.setCommitIndex(commitIndex)
+		s.log.sync()  // 先同步到磁盘
+		s.log.setCommitIndex(commitIndex)  // 提交并设置提交点
 		s.debugln("commit index ", commitIndex)
 	}
 }
