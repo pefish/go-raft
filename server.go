@@ -434,7 +434,7 @@ func init() {
 // If no log entries exist then wait for AEs from another node.
 // If no log entries exist and a self-join command is issued then
 // immediately become leader and commit entry.
-func (s *server) Start() error {
+func (s *server) Start() error {  // raft协议的启动位置
 	// Exit if the server is already running.
 	if s.Running() {
 		return fmt.Errorf("raft.Server: Server already running[%v]", s.state)
