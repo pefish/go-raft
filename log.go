@@ -1,632 +1,361 @@
+// Copyright 2015 CoreOS, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package raft
 
 import (
-	"bufio"
-	"errors"
 	"fmt"
-	"io"
-	"os"
-	"sync"
+	"log"
 
-	"github.com/goraft/raft/protobuf"
+	pb "github.com/pefish/go-raft/raftpb"
 )
 
-//------------------------------------------------------------------------------
-//
-// Typedefs
-//
-//------------------------------------------------------------------------------
+type raftLog struct {
+	// storage contains all stable entries since the last snapshot.
+	storage Storage
 
-// A log is a collection of log entries that are persisted to durable storage.
-type Log struct {
-	ApplyFunc   func(*LogEntry, Command) (interface{}, error)
-	file        *os.File
-	path        string
-	entries     []*LogEntry
-	commitIndex uint64
-	mutex       sync.RWMutex
-	startIndex  uint64 // the index before the first entry in the Log entries
-	startTerm   uint64
-	initialized bool
+	// unstable contains all unstable entries and snapshot.
+	// they will be saved into storage.
+	unstable unstable
+
+	// committed is the highest log position that is known to be in
+	// stable storage on a quorum of nodes.
+	committed uint64
+	// applied is the highest log position that the application has
+	// been instructed to apply to its state machine.
+	// Invariant: applied <= committed
+	applied uint64
+
+	logger Logger
 }
 
-// The results of the applying a log entry.
-type logResult struct {
-	returnValue interface{}
-	err         error
-}
-
-//------------------------------------------------------------------------------
-//
-// Constructor
-//
-//------------------------------------------------------------------------------
-
-// Creates a new log.
-func newLog() *Log {
-	return &Log{
-		entries: make([]*LogEntry, 0),
+// newLog returns log using the given storage. It recovers the log to the state
+// that it just commits and applies the latest snapshot.
+func newLog(storage Storage, logger Logger) *raftLog {
+	if storage == nil {
+		log.Panic("storage must not be nil")
 	}
-}
-
-//------------------------------------------------------------------------------
-//
-// Accessors
-//
-//------------------------------------------------------------------------------
-
-//--------------------------------------
-// Log Indices
-//--------------------------------------
-
-// The last committed index in the log.
-func (l *Log) CommitIndex() uint64 {
-	l.mutex.RLock()
-	defer l.mutex.RUnlock()
-	return l.commitIndex
-}
-
-// The current index in the log.
-func (l *Log) currentIndex() uint64 {
-	l.mutex.RLock()
-	defer l.mutex.RUnlock()
-	return l.internalCurrentIndex()
-}
-
-// The current index in the log without locking
-func (l *Log) internalCurrentIndex() uint64 {
-	if len(l.entries) == 0 {
-		return l.startIndex
+	log := &raftLog{
+		storage: storage,
+		logger:  logger,
 	}
-	return l.entries[len(l.entries)-1].Index()
-}
-
-// The next index in the log.
-func (l *Log) nextIndex() uint64 {
-	return l.currentIndex() + 1
-}
-
-// Determines if the log contains zero entries.
-func (l *Log) isEmpty() bool {
-	l.mutex.RLock()
-	defer l.mutex.RUnlock()
-	return (len(l.entries) == 0) && (l.startIndex == 0)
-}
-
-// The name of the last command in the log.
-func (l *Log) lastCommandName() string {
-	l.mutex.RLock()
-	defer l.mutex.RUnlock()
-	if len(l.entries) > 0 {
-		if entry := l.entries[len(l.entries)-1]; entry != nil {
-			return entry.CommandName()
-		}
-	}
-	return ""
-}
-
-//--------------------------------------
-// Log Terms
-//--------------------------------------
-
-// The current term in the log.
-func (l *Log) currentTerm() uint64 {
-	l.mutex.RLock()
-	defer l.mutex.RUnlock()
-
-	if len(l.entries) == 0 {
-		return l.startTerm
-	}
-	return l.entries[len(l.entries)-1].Term()
-}
-
-//------------------------------------------------------------------------------
-//
-// Methods
-//
-//------------------------------------------------------------------------------
-
-//--------------------------------------
-// State
-//--------------------------------------
-
-// Opens the log file and reads existing entries. The log can remain open and
-// continue to append entries to the end of the log.
-func (l *Log) open(path string) error {
-	// Read all the entries from the log if one exists.
-	var readBytes int64
-
-	var err error
-	debugln("log.open.open ", path)
-	// open log file
-	l.file, err = os.OpenFile(path, os.O_RDWR, 0600)
-	l.path = path
-
+	firstIndex, err := storage.FirstIndex()
 	if err != nil {
-		// if the log file does not exist before
-		// we create the log file and set commitIndex to 0
-		if os.IsNotExist(err) {
-			l.file, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0600)
-			debugln("log.open.create ", path)
-			if err == nil {
-				l.initialized = true
-			}
-			return err
-		}
-		return err
+		panic(err) // TODO(bdarnell)
 	}
-	debugln("log.open.exist ", path)
+	lastIndex, err := storage.LastIndex()
+	if err != nil {
+		panic(err) // TODO(bdarnell)
+	}
+	log.unstable.offset = lastIndex + 1
+	log.unstable.logger = logger
+	// Initialize our committed and applied pointers to the time of the last compaction.
+	log.committed = firstIndex - 1
+	log.applied = firstIndex - 1
 
-	// Read the file and decode entries.
-	for {
-		// Instantiate log entry and decode into it.
-		entry, _ := newLogEntry(l, nil, 0, 0, nil)
-		entry.Position, _ = l.file.Seek(0, os.SEEK_CUR)
+	return log
+}
 
-		n, err := entry.Decode(l.file)
+func (l *raftLog) String() string {
+	return fmt.Sprintf("committed=%d, applied=%d, unstable.offset=%d, len(unstable.Entries)=%d", l.committed, l.applied, l.unstable.offset, len(l.unstable.entries))
+}
+
+// maybeAppend returns (0, false) if the entries cannot be appended. Otherwise,
+// it returns (last index of new entries, true).
+func (l *raftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry) (lastnewi uint64, ok bool) {
+	lastnewi = index + uint64(len(ents))
+	if l.matchTerm(index, logTerm) {
+		ci := l.findConflict(ents)
+		switch {
+		case ci == 0:
+		case ci <= l.committed:
+			l.logger.Panicf("entry %d conflict with committed entry [committed(%d)]", ci, l.committed)
+		default:
+			offset := index + 1
+			l.append(ents[ci-offset:]...)
+		}
+		l.commitTo(min(committed, lastnewi))
+		return lastnewi, true
+	}
+	return 0, false
+}
+
+func (l *raftLog) append(ents ...pb.Entry) uint64 {
+	if len(ents) == 0 {
+		return l.lastIndex()
+	}
+	if after := ents[0].Index - 1; after < l.committed {
+		l.logger.Panicf("after(%d) is out of range [committed(%d)]", after, l.committed)
+	}
+	l.unstable.truncateAndAppend(ents)
+	return l.lastIndex()
+}
+
+// findConflict finds the index of the conflict.
+// It returns the first pair of conflicting entries between the existing
+// entries and the given entries, if there are any.
+// If there is no conflicting entries, and the existing entries contains
+// all the given entries, zero will be returned.
+// If there is no conflicting entries, but the given entries contains new
+// entries, the index of the first new entry will be returned.
+// An entry is considered to be conflicting if it has the same index but
+// a different term.
+// The first entry MUST have an index equal to the argument 'from'.
+// The index of the given entries MUST be continuously increasing.
+func (l *raftLog) findConflict(ents []pb.Entry) uint64 {
+	for _, ne := range ents {
+		if !l.matchTerm(ne.Index, ne.Term) {
+			if ne.Index <= l.lastIndex() {
+				l.logger.Infof("found conflict at index %d [existing term: %d, conflicting term: %d]",
+					ne.Index, l.zeroTermOnErrCompacted(l.term(ne.Index)), ne.Term)
+			}
+			return ne.Index
+		}
+	}
+	return 0
+}
+
+func (l *raftLog) unstableEntries() []pb.Entry {
+	if len(l.unstable.entries) == 0 {
+		return nil
+	}
+	return l.unstable.entries
+}
+
+// nextEnts returns all the available entries for execution.
+// If applied is smaller than the index of snapshot, it returns all committed
+// entries after the index of snapshot.
+func (l *raftLog) nextEnts() (ents []pb.Entry) {
+	off := max(l.applied+1, l.firstIndex())
+	if l.committed+1 > off {
+		ents, err := l.slice(off, l.committed+1, noLimit)
 		if err != nil {
-			if err == io.EOF {
-				debugln("open.log.append: finish ")
-			} else {
-				if err = os.Truncate(path, readBytes); err != nil {
-					return fmt.Errorf("raft.Log: Unable to recover: %v", err)
-				}
-			}
-			break
+			l.logger.Panicf("unexpected error when getting unapplied entries (%v)", err)
 		}
-		if entry.Index() > l.startIndex {
-			// Append entry.
-			l.entries = append(l.entries, entry)
-			if entry.Index() <= l.commitIndex {
-				command, err := newCommand(entry.CommandName(), entry.Command())
-				if err != nil {
-					continue
-				}
-				l.ApplyFunc(entry, command)
-			}
-			debugln("open.log.append log index ", entry.Index())
-		}
-
-		readBytes += int64(n)
-	}
-	debugln("open.log.recovery number of log ", len(l.entries))
-	l.initialized = true
-	return nil
-}
-
-// Closes the log file.
-func (l *Log) close() {
-	l.mutex.Lock()
-	defer l.mutex.Unlock()
-
-	if l.file != nil {
-		l.file.Close()
-		l.file = nil
-	}
-	l.entries = make([]*LogEntry, 0)
-}
-
-// sync to disk
-func (l *Log) sync() error {
-	return l.file.Sync()
-}
-
-//--------------------------------------
-// Entries
-//--------------------------------------
-
-// Creates a log entry associated with this log.
-func (l *Log) createEntry(term uint64, command Command, e *ev) (*LogEntry, error) {
-	return newLogEntry(l, e, l.nextIndex(), term, command)
-}
-
-// Retrieves an entry from the log. If the entry has been eliminated because
-// of a snapshot then nil is returned.
-func (l *Log) getEntry(index uint64) *LogEntry {
-	l.mutex.RLock()
-	defer l.mutex.RUnlock()
-
-	if index <= l.startIndex || index > (l.startIndex+uint64(len(l.entries))) {
-		return nil
-	}
-	return l.entries[index-l.startIndex-1]
-}
-
-// Checks if the log contains a given index/term combination.
-func (l *Log) containsEntry(index uint64, term uint64) bool {
-	entry := l.getEntry(index)
-	return (entry != nil && entry.Term() == term)
-}
-
-// Retrieves a list of entries after a given index as well as the term of the
-// index provided. A nil list of entries is returned if the index no longer
-// exists because a snapshot was made.
-func (l *Log) getEntriesAfter(index uint64, maxLogEntriesPerRequest uint64) ([]*LogEntry, uint64) {
-	l.mutex.RLock()
-	defer l.mutex.RUnlock()
-
-	// Return nil if index is before the start of the log.
-	if index < l.startIndex {
-		traceln("log.entriesAfter.before: ", index, " ", l.startIndex)
-		return nil, 0
-	}
-
-	// Return an error if the index doesn't exist.
-	if index > (uint64(len(l.entries)) + l.startIndex) {
-		panic(fmt.Sprintf("raft: Index is beyond end of log: %v %v", len(l.entries), index))
-	}
-
-	// If we're going from the beginning of the log then return the whole log.
-	if index == l.startIndex {
-		traceln("log.entriesAfter.beginning: ", index, " ", l.startIndex)
-		return l.entries, l.startTerm
-	}
-
-	traceln("log.entriesAfter.partial: ", index, " ", l.entries[len(l.entries)-1].Index)
-
-	entries := l.entries[index-l.startIndex:]
-	length := len(entries)
-
-	traceln("log.entriesAfter: startIndex:", l.startIndex, " length", len(l.entries))
-
-	if uint64(length) < maxLogEntriesPerRequest {
-		// Determine the term at the given entry and return a subslice.
-		return entries, l.entries[index-1-l.startIndex].Term()
-	} else {
-		return entries[:maxLogEntriesPerRequest], l.entries[index-1-l.startIndex].Term()
-	}
-}
-
-//--------------------------------------
-// Commit
-//--------------------------------------
-
-// Retrieves the last index and term that has been committed to the log.
-func (l *Log) commitInfo() (index uint64, term uint64) {
-	l.mutex.RLock()
-	defer l.mutex.RUnlock()
-	// If we don't have any committed entries then just return zeros.
-	if l.commitIndex == 0 {
-		return 0, 0
-	}
-
-	// No new commit log after snapshot
-	if l.commitIndex == l.startIndex {
-		return l.startIndex, l.startTerm
-	}
-
-	// Return the last index & term from the last committed entry.
-	debugln("commitInfo.get.[", l.commitIndex, "/", l.startIndex, "]")
-	entry := l.entries[l.commitIndex-1-l.startIndex]
-	return entry.Index(), entry.Term()
-}
-
-// Retrieves the last index and term that has been appended to the log.
-func (l *Log) lastInfo() (index uint64, term uint64) {
-	l.mutex.RLock()
-	defer l.mutex.RUnlock()
-
-	// If we don't have any entries then just return zeros.
-	if len(l.entries) == 0 {
-		return l.startIndex, l.startTerm
-	}
-
-	// Return the last index & term
-	entry := l.entries[len(l.entries)-1]
-	return entry.Index(), entry.Term()
-}
-
-// Updates the commit index
-func (l *Log) updateCommitIndex(index uint64) {
-	l.mutex.Lock()
-	defer l.mutex.Unlock()
-	if index > l.commitIndex {
-		l.commitIndex = index
-	}
-	debugln("update.commit.index ", index)
-}
-
-// Updates the commit index and writes entries after that index to the stable storage.
-func (l *Log) setCommitIndex(index uint64) error {
-	l.mutex.Lock()
-	defer l.mutex.Unlock()
-
-	// this is not error any more after limited the number of sending entries
-	// commit up to what we already have
-	if index > l.startIndex+uint64(len(l.entries)) {
-		debugln("raft.Log: Commit index", index, "set back to ", len(l.entries))
-		index = l.startIndex + uint64(len(l.entries))
-	}
-
-	// Do not allow previous indices to be committed again.
-
-	// This could happens, since the guarantee is that the new leader has up-to-dated
-	// log entries rather than has most up-to-dated committed index
-
-	// For example, Leader 1 send log 80 to follower 2 and follower 3
-	// follower 2 and follow 3 all got the new entries and reply
-	// leader 1 committed entry 80 and send reply to follower 2 and follower3
-	// follower 2 receive the new committed index and update committed index to 80
-	// leader 1 fail to send the committed index to follower 3
-	// follower 3 promote to leader (server 1 and server 2 will vote, since leader 3
-	// has up-to-dated the entries)
-	// when new leader 3 send heartbeat with committed index = 0 to follower 2,
-	// follower 2 should reply success and let leader 3 update the committed index to 80
-
-	if index < l.commitIndex {
-		return nil
-	}
-
-	// Find all entries whose index is between the previous index and the current index.
-	for i := l.commitIndex + 1; i <= index; i++ {
-		entryIndex := i - 1 - l.startIndex
-		entry := l.entries[entryIndex]
-
-		// Update commit index.
-		l.commitIndex = entry.Index()
-
-		// Decode the command.
-		command, err := newCommand(entry.CommandName(), entry.Command())
-		if err != nil {
-			return err
-		}
-
-		// Apply the changes to the state machine and store the error code.
-		returnValue, err := l.ApplyFunc(entry, command)
-
-		debugf("setCommitIndex.set.result index: %v, entries index: %v", i, entryIndex)
-		if entry.event != nil {
-			entry.event.returnValue = returnValue
-			entry.event.c <- err
-		}
-
-		_, isJoinCommand := command.(JoinCommand)
-
-		// we can only commit up to the most recent join command
-		// if there is a join in this batch of commands.
-		// after this commit, we need to recalculate the majority.
-		if isJoinCommand {
-			return nil
-		}
+		return ents
 	}
 	return nil
 }
 
-// Set the commitIndex at the head of the log file to the current
-// commit Index. This should be called after obtained a log lock
-func (l *Log) flushCommitIndex() {
-	l.file.Seek(0, os.SEEK_SET)
-	fmt.Fprintf(l.file, "%8x\n", l.commitIndex)
-	l.file.Seek(0, os.SEEK_END)
+// hasNextEnts returns if there is any available entries for execution. This
+// is a fast check without heavy raftLog.slice() in raftLog.nextEnts().
+func (l *raftLog) hasNextEnts() bool {
+	off := max(l.applied+1, l.firstIndex())
+	if l.committed+1 > off {
+		return true
+	}
+	return false
 }
 
-//--------------------------------------
-// Truncation
-//--------------------------------------
-
-// Truncates the log to the given index and term. This only works if the log
-// at the index has not been committed.
-func (l *Log) truncate(index uint64, term uint64) error {
-	l.mutex.Lock()
-	defer l.mutex.Unlock()
-	debugln("log.truncate: ", index)
-
-	// Do not allow committed entries to be truncated.
-	if index < l.commitIndex {
-		debugln("log.truncate.before")
-		return fmt.Errorf("raft.Log: Index is already committed (%v): (IDX=%v, TERM=%v)", l.commitIndex, index, term)
+func (l *raftLog) snapshot() (pb.Snapshot, error) {
+	if l.unstable.snapshot != nil {
+		return *l.unstable.snapshot, nil
 	}
-
-	// Do not truncate past end of entries.
-	if index > l.startIndex+uint64(len(l.entries)) {
-		debugln("log.truncate.after")
-		return fmt.Errorf("raft.Log: Entry index does not exist (MAX=%v): (IDX=%v, TERM=%v)", len(l.entries), index, term)
-	}
-
-	// If we're truncating everything then just clear the entries.
-	if index == l.startIndex {
-		debugln("log.truncate.clear")
-		l.file.Truncate(0)
-		l.file.Seek(0, os.SEEK_SET)
-
-		// notify clients if this node is the previous leader
-		for _, entry := range l.entries {
-			if entry.event != nil {
-				entry.event.c <- errors.New("command failed to be committed due to node failure")
-			}
-		}
-
-		l.entries = []*LogEntry{}
-	} else {
-		// Do not truncate if the entry at index does not have the matching term.
-		entry := l.entries[index-l.startIndex-1]
-		if len(l.entries) > 0 && entry.Term() != term {
-			debugln("log.truncate.termMismatch")
-			return fmt.Errorf("raft.Log: Entry at index does not have matching term (%v): (IDX=%v, TERM=%v)", entry.Term(), index, term)
-		}
-
-		// Otherwise truncate up to the desired entry.
-		if index < l.startIndex+uint64(len(l.entries)) {
-			debugln("log.truncate.finish")
-			position := l.entries[index-l.startIndex].Position
-			l.file.Truncate(position)
-			l.file.Seek(position, os.SEEK_SET)
-
-			// notify clients if this node is the previous leader
-			for i := index - l.startIndex; i < uint64(len(l.entries)); i++ {
-				entry := l.entries[i]
-				if entry.event != nil {
-					entry.event.c <- errors.New("command failed to be committed due to node failure")
-				}
-			}
-
-			l.entries = l.entries[0 : index-l.startIndex]
-		}
-	}
-
-	return nil
+	return l.storage.Snapshot()
 }
 
-//--------------------------------------
-// Append
-//--------------------------------------
-
-// Appends a series of entries to the log.
-func (l *Log) appendEntries(entries []*protobuf.LogEntry) error {
-	l.mutex.Lock()
-	defer l.mutex.Unlock()
-
-	startPosition, _ := l.file.Seek(0, os.SEEK_CUR)
-
-	w := bufio.NewWriter(l.file)
-
-	var size int64
-	var err error
-	// Append each entry but exit if we hit an error.
-	for i := range entries {
-		logEntry := &LogEntry{
-			log:      l,
-			Position: startPosition,
-			pb:       entries[i],
-		}
-
-		if size, err = l.writeEntry(logEntry, w); err != nil {
-			return err
-		}
-
-		startPosition += size
+func (l *raftLog) firstIndex() uint64 {
+	if i, ok := l.unstable.maybeFirstIndex(); ok {
+		return i
 	}
-	w.Flush()
-	err = l.sync()
-
+	index, err := l.storage.FirstIndex()
 	if err != nil {
-		panic(err)
+		panic(err) // TODO(bdarnell)
+	}
+	return index
+}
+
+func (l *raftLog) lastIndex() uint64 {
+	if i, ok := l.unstable.maybeLastIndex(); ok {
+		return i
+	}
+	i, err := l.storage.LastIndex()
+	if err != nil {
+		panic(err) // TODO(bdarnell)
+	}
+	return i
+}
+
+func (l *raftLog) commitTo(tocommit uint64) {
+	// never decrease commit
+	if l.committed < tocommit {
+		if l.lastIndex() < tocommit {
+			l.logger.Panicf("tocommit(%d) is out of range [lastIndex(%d)]. Was the raft log corrupted, truncated, or lost?", tocommit, l.lastIndex())
+		}
+		l.committed = tocommit
+	}
+}
+
+func (l *raftLog) appliedTo(i uint64) {
+	if i == 0 {
+		return
+	}
+	if l.committed < i || i < l.applied {
+		l.logger.Panicf("applied(%d) is out of range [prevApplied(%d), committed(%d)]", i, l.applied, l.committed)
+	}
+	l.applied = i
+}
+
+func (l *raftLog) stableTo(i, t uint64) { l.unstable.stableTo(i, t) }
+
+func (l *raftLog) stableSnapTo(i uint64) { l.unstable.stableSnapTo(i) }
+
+func (l *raftLog) lastTerm() uint64 {
+	t, err := l.term(l.lastIndex())
+	if err != nil {
+		l.logger.Panicf("unexpected error when getting the last term (%v)", err)
+	}
+	return t
+}
+
+func (l *raftLog) term(i uint64) (uint64, error) {
+	// the valid term range is [index of dummy entry, last index]
+	dummyIndex := l.firstIndex() - 1
+	if i < dummyIndex || i > l.lastIndex() {
+		// TODO: return an error instead?
+		return 0, nil
 	}
 
+	if t, ok := l.unstable.maybeTerm(i); ok {
+		return t, nil
+	}
+
+	t, err := l.storage.Term(i)
+	if err == nil {
+		return t, nil
+	}
+	if err == ErrCompacted {
+		return 0, err
+	}
+	panic(err) // TODO(bdarnell)
+}
+
+func (l *raftLog) entries(i, maxsize uint64) ([]pb.Entry, error) {
+	if i > l.lastIndex() {
+		return nil, nil
+	}
+	return l.slice(i, l.lastIndex()+1, maxsize)
+}
+
+// allEntries returns all entries in the log.
+func (l *raftLog) allEntries() []pb.Entry {
+	ents, err := l.entries(l.firstIndex(), noLimit)
+	if err == nil {
+		return ents
+	}
+	if err == ErrCompacted { // try again if there was a racing compaction
+		return l.allEntries()
+	}
+	// TODO (xiangli): handle error?
+	panic(err)
+}
+
+// isUpToDate determines if the given (lastIndex,term) log is more up-to-date
+// by comparing the index and term of the last entries in the existing logs.
+// If the logs have last entries with different terms, then the log with the
+// later term is more up-to-date. If the logs end with the same term, then
+// whichever log has the larger lastIndex is more up-to-date. If the logs are
+// the same, the given log is up-to-date.
+func (l *raftLog) isUpToDate(lasti, term uint64) bool {
+	return term > l.lastTerm() || (term == l.lastTerm() && lasti >= l.lastIndex())
+}
+
+func (l *raftLog) matchTerm(i, term uint64) bool {
+	t, err := l.term(i)
+	if err != nil {
+		return false
+	}
+	return t == term
+}
+
+func (l *raftLog) maybeCommit(maxIndex, term uint64) bool {
+	if maxIndex > l.committed && l.zeroTermOnErrCompacted(l.term(maxIndex)) == term {
+		l.commitTo(maxIndex)
+		return true
+	}
+	return false
+}
+
+func (l *raftLog) restore(s pb.Snapshot) {
+	l.logger.Infof("log [%s] starts to restore snapshot [index: %d, term: %d]", l, s.Metadata.Index, s.Metadata.Term)
+	l.committed = s.Metadata.Index
+	l.unstable.restore(s)
+}
+
+// slice returns a slice of log entries from lo through hi-1, inclusive.
+func (l *raftLog) slice(lo, hi, maxSize uint64) ([]pb.Entry, error) {
+	err := l.mustCheckOutOfBounds(lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	if lo == hi {
+		return nil, nil
+	}
+	var ents []pb.Entry
+	if lo < l.unstable.offset {
+		storedEnts, err := l.storage.Entries(lo, min(hi, l.unstable.offset), maxSize)
+		if err == ErrCompacted {
+			return nil, err
+		} else if err == ErrUnavailable {
+			l.logger.Panicf("entries[%d:%d) is unavailable from storage", lo, min(hi, l.unstable.offset))
+		} else if err != nil {
+			panic(err) // TODO(bdarnell)
+		}
+
+		// check if ents has reached the size limitation
+		if uint64(len(storedEnts)) < min(hi, l.unstable.offset)-lo {
+			return storedEnts, nil
+		}
+
+		ents = storedEnts
+	}
+	if hi > l.unstable.offset {
+		unstable := l.unstable.slice(max(lo, l.unstable.offset), hi)
+		if len(ents) > 0 {
+			ents = append([]pb.Entry{}, ents...)
+			ents = append(ents, unstable...)
+		} else {
+			ents = unstable
+		}
+	}
+	return limitSize(ents, maxSize), nil
+}
+
+// l.firstIndex <= lo <= hi <= l.firstIndex + len(l.entries)
+func (l *raftLog) mustCheckOutOfBounds(lo, hi uint64) error {
+	if lo > hi {
+		l.logger.Panicf("invalid slice %d > %d", lo, hi)
+	}
+	fi := l.firstIndex()
+	if lo < fi {
+		return ErrCompacted
+	}
+
+	length := l.lastIndex() - fi + 1
+	if lo < fi || hi > fi+length {
+		l.logger.Panicf("slice[%d,%d) out of bound [%d,%d]", lo, hi, fi, l.lastIndex())
+	}
 	return nil
 }
 
-// Writes a single log entry to the end of the log.
-func (l *Log) appendEntry(entry *LogEntry) error {
-	l.mutex.Lock()
-	defer l.mutex.Unlock()
-
-	if l.file == nil {
-		return errors.New("raft.Log: Log is not open")
+func (l *raftLog) zeroTermOnErrCompacted(t uint64, err error) uint64 {
+	if err == nil {
+		return t
 	}
-
-	// Make sure the term and index are greater than the previous.
-	if len(l.entries) > 0 {
-		lastEntry := l.entries[len(l.entries)-1]
-		if entry.Term() < lastEntry.Term() {
-			return fmt.Errorf("raft.Log: Cannot append entry with earlier term (%x:%x <= %x:%x)", entry.Term(), entry.Index(), lastEntry.Term(), lastEntry.Index())
-		} else if entry.Term() == lastEntry.Term() && entry.Index() <= lastEntry.Index() {
-			return fmt.Errorf("raft.Log: Cannot append entry with earlier index in the same term (%x:%x <= %x:%x)", entry.Term(), entry.Index(), lastEntry.Term(), lastEntry.Index())
-		}
+	if err == ErrCompacted {
+		return 0
 	}
-
-	position, _ := l.file.Seek(0, os.SEEK_CUR)
-
-	entry.Position = position
-
-	// Write to storage.
-	if _, err := entry.Encode(l.file); err != nil {
-		return err
-	}
-
-	// Append to entries list if stored on disk.
-	l.entries = append(l.entries, entry)
-
-	return nil
-}
-
-// appendEntry with Buffered io
-func (l *Log) writeEntry(entry *LogEntry, w io.Writer) (int64, error) {
-	if l.file == nil {
-		return -1, errors.New("raft.Log: Log is not open")
-	}
-
-	// Make sure the term and index are greater than the previous.
-	if len(l.entries) > 0 {
-		lastEntry := l.entries[len(l.entries)-1]
-		if entry.Term() < lastEntry.Term() {
-			return -1, fmt.Errorf("raft.Log: Cannot append entry with earlier term (%x:%x <= %x:%x)", entry.Term(), entry.Index(), lastEntry.Term(), lastEntry.Index())
-		} else if entry.Term() == lastEntry.Term() && entry.Index() <= lastEntry.Index() {
-			return -1, fmt.Errorf("raft.Log: Cannot append entry with earlier index in the same term (%x:%x <= %x:%x)", entry.Term(), entry.Index(), lastEntry.Term(), lastEntry.Index())
-		}
-	}
-
-	// Write to storage.
-	size, err := entry.Encode(w)
-	if err != nil {
-		return -1, err
-	}
-
-	// Append to entries list if stored on disk.
-	l.entries = append(l.entries, entry)
-
-	return int64(size), nil
-}
-
-//--------------------------------------
-// Log compaction
-//--------------------------------------
-
-// compact the log before index (including index)
-func (l *Log) compact(index uint64, term uint64) error {
-	var entries []*LogEntry
-
-	l.mutex.Lock()
-	defer l.mutex.Unlock()
-
-	if index == 0 {
-		return nil
-	}
-	// nothing to compaction
-	// the index may be greater than the current index if
-	// we just recovery from on snapshot
-	if index >= l.internalCurrentIndex() {
-		entries = make([]*LogEntry, 0)
-	} else {
-		// get all log entries after index
-		entries = l.entries[index-l.startIndex:]
-	}
-
-	// create a new log file and add all the entries
-	new_file_path := l.path + ".new"
-	file, err := os.OpenFile(new_file_path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		position, _ := l.file.Seek(0, os.SEEK_CUR)
-		entry.Position = position
-
-		if _, err = entry.Encode(file); err != nil {
-			file.Close()
-			os.Remove(new_file_path)
-			return err
-		}
-	}
-	file.Sync()
-
-	old_file := l.file
-
-	// rename the new log file
-	err = os.Rename(new_file_path, l.path)
-	if err != nil {
-		file.Close()
-		os.Remove(new_file_path)
-		return err
-	}
-	l.file = file
-
-	// close the old log file
-	old_file.Close()
-
-	// compaction the in memory log
-	l.entries = entries
-	l.startIndex = index
-	l.startTerm = term
-	return nil
+	l.logger.Panicf("unexpected error (%v)", err)
+	return 0
 }
