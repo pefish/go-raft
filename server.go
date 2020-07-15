@@ -424,7 +424,7 @@ func (s *server) SetHeartbeatInterval(duration time.Duration) {
 
 // Reg the NOPCommand
 func init() {  // 包初始化
-	RegisterCommand(&NOPCommand{})
+	RegisterCommand(&NOPCommand{})  // 注册命令，只有向协议层注册了命令，这个命令才会被协议层认可接受
 	RegisterCommand(&DefaultJoinCommand{})
 	RegisterCommand(&DefaultLeaveCommand{})
 }
@@ -679,13 +679,13 @@ func (s *server) followerLoop() {  // 如果本节点的状态是随从，则一
 			return
 
 		case e := <-s.c:  // 接收事件
-			switch req := e.target.(type) {
+			switch req := e.target.(type) {  // follower只处理JoinCommand，不处理其他命令，就是说follower不处理应用层的命令
 			case JoinCommand:  // "加入网络"的命令，一个节点在启动后，会给自己发一个"加入网络"的命令
 				//If no log entries exist and a self-join command is issued
 				//then immediately become leader and commit entry.
 				if s.log.currentIndex() == 0 && req.NodeName() == s.Name() {
 					s.debugln("selfjoin and promote to leader")
-					s.setState(Leader)
+					s.setState(Leader)  // 将自己设置成leader
 					s.processCommand(req, e)  // 加入一个entry，但未提交，需要等待peer同步
 				} else {
 					err = NotLeaderError
@@ -693,7 +693,7 @@ func (s *server) followerLoop() {  // 如果本节点的状态是随从，则一
 			case *AppendEntriesRequest:  // leader发出的附加entry的请求
 				// If heartbeats get too close to the election timeout then send an event.
 				elapsedTime := time.Now().Sub(since)
-				if elapsedTime > time.Duration(float64(electionTimeout)*ElectionTimeoutThresholdPercent) {
+				if elapsedTime > time.Duration(float64(electionTimeout)*ElectionTimeoutThresholdPercent) {  // 如果leader的心跳很久没有发过来
 					s.DispatchEvent(newEvent(ElectionTimeoutThresholdEventType, elapsedTime, nil))
 				}
 				e.returnValue, update = s.processAppendEntriesRequest(req)
@@ -893,7 +893,7 @@ func (s *server) snapshotLoop() {  // 当本节点处于快照状态，就会做
 // Attempts to execute a command and replicate it. The function will return
 // when the command has been successfully committed or an error has occurred.
 
-func (s *server) Do(command Command) (interface{}, error) {
+func (s *server) Do(command Command) (interface{}, error) {  // 是阻塞的，等待共识结束才返回，由应用层调用
 	return s.send(command)
 }
 
@@ -917,7 +917,7 @@ func (s *server) processCommand(command Command, e *ev) {
 	}
 
 	s.syncedPeer[s.Name()] = true  // 自己先给自己投一票
-	if len(s.peers) == 0 {  // 如果一个邻节点都没有，则直接提交。新节点刚启动时会给自己发送一个加入网络的命令(命令中附带一个连接peer的字符串)，此时是独自一个节点，这里就会直接提交，然后调用这个应用层的回调，回调中执行这个命令的动作（动作就是add peer）
+	if len(s.peers) == 0 {  // 如果一个邻节点都没有，则直接提交。新节点刚启动时会给自己发送一个加入网络的命令(命令中附带一个连接peer的字符串)，此时是独自一个节点，自己立马成为leader，这里会直接提交，然后调用这个应用层的回调，回调中执行这个命令的动作（动作就是add peer）
 		commitIndex := s.log.currentIndex()
 		s.log.setCommitIndex(commitIndex)
 		s.debugln("commit index ", commitIndex)
@@ -1036,7 +1036,7 @@ func (s *server) processAppendEntriesResponse(resp *AppendEntriesResponse) {
 //    which will also cause the candidate to step-down, and return false.
 // 3. if the vote is for a smaller term, ignore it and return false.
 func (s *server) processVoteResponse(resp *RequestVoteResponse) bool {
-	if resp.VoteGranted && resp.Term == s.currentTerm {
+	if resp.VoteGranted && resp.Term == s.currentTerm {  // 回复者的任期等于当前任期，投票才被接受
 		return true
 	}
 

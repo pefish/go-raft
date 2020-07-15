@@ -190,7 +190,7 @@ func (p *Peer) sendAppendEntriesRequest(req *AppendEntriesRequest) {
 	tracef("peer.append.send: %s->%s [prevLog:%v length: %v]\n",
 		p.server.Name(), p.Name, req.PrevLogIndex, len(req.Entries))
 
-	resp := p.server.Transporter().SendAppendEntriesRequest(p.server, p, req)  // 发送附加log请求
+	resp := p.server.Transporter().SendAppendEntriesRequest(p.server, p, req)  // 通过网络请求发送附加log请求
 	if resp == nil {
 		p.server.DispatchEvent(newEvent(HeartbeatIntervalEventType, p, nil))
 		debugln("peer.append.timeout: ", p.server.Name(), "->", p.Name)
