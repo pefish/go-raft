@@ -67,19 +67,19 @@ func (x *EntryType) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-type MessageType int32
+type MessageType int32  // 消息中包含多个entry
 
 const (
 	MsgHup           MessageType = 0
 	MsgBeat          MessageType = 1
-	MsgProp          MessageType = 2
-	MsgApp           MessageType = 3
-	MsgAppResp       MessageType = 4
-	MsgVote          MessageType = 5
-	MsgVoteResp      MessageType = 6
-	MsgSnap          MessageType = 7
-	MsgHeartbeat     MessageType = 8
-	MsgHeartbeatResp MessageType = 9
+	MsgProp          MessageType = 2  // propose append msg
+	MsgApp           MessageType = 3  // append msg
+	MsgAppResp       MessageType = 4  // response of append msg
+	MsgVote          MessageType = 5  // vote msg
+	MsgVoteResp      MessageType = 6  // response of vote msg
+	MsgSnap          MessageType = 7  // snapshot msg
+	MsgHeartbeat     MessageType = 8  // heartbeat msg
+	MsgHeartbeatResp MessageType = 9  // response of heartbeat msg
 	MsgUnreachable   MessageType = 10
 	MsgSnapStatus    MessageType = 11
 	MsgCheckQuorum   MessageType = 12

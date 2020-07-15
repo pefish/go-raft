@@ -17,9 +17,9 @@ package raft
 import "fmt"
 
 const (
-	ProgressStateProbe ProgressStateType = iota
-	ProgressStateReplicate
-	ProgressStateSnapshot
+	ProgressStateProbe ProgressStateType = iota  // 这个状态下，leader每次心跳只发送一个msg，而且要等待follower回复了才能发下一个msg，也就是inflights最多让放一个msg。新leader一开始都会把folowers设置成这个状态
+	ProgressStateReplicate  // inflights可以放很多。当follower回复上一个msgApp成功时，会从ProgressStateProbe变成这个状态。如果follower拒绝msgApp或者不可达，则又变成ProgressStateProbe状态
+	ProgressStateSnapshot   // 这个状态下，leader不发送任何msg，也就是inflights中不能放。leader发现follower需要快照时，会设置成这个状态然后发送msgSnap消息并等待回复，如果回复快照成功则变成ProgressStateProbe状态
 )
 
 type ProgressStateType uint64
@@ -34,8 +34,8 @@ func (st ProgressStateType) String() string { return prstmap[uint64(st)] }
 
 // Progress represents a follower’s progress in the view of the leader. Leader maintains
 // progresses of all followers, and sends entries to the follower based on its progress.
-type Progress struct {
-	Match, Next uint64
+type Progress struct {   // 表示follower的进度信息，leader会维护每个follower的进度信息
+	Match, Next uint64  // Match表示这个节点当前的log index，Next表示要被leader同步的第一个log index。leader会把[next, leader的最新index)的entries放入MsgApp消息中发给followers
 	// State defines how the leader should interact with the follower.
 	//
 	// When in ProgressStateProbe, leader sends at most one replication message
@@ -47,16 +47,16 @@ type Progress struct {
 	//
 	// When in ProgressStateSnapshot, leader should have sent out snapshot
 	// before and stops sending any replication message.
-	State ProgressStateType
+	State ProgressStateType  // 表示follower的状态。
 	// Paused is used in ProgressStateProbe.
 	// When Paused is true, raft should pause sending replication message to this peer.
-	Paused bool
+	Paused bool  // 被用于ProgressStateProbe状态中
 	// PendingSnapshot is used in ProgressStateSnapshot.
 	// If there is a pending snapshot, the pendingSnapshot will be set to the
 	// index of the snapshot. If pendingSnapshot is set, the replication process of
 	// this Progress will be paused. raft will not resend snapshot until the pending one
 	// is reported to be failed.
-	PendingSnapshot uint64
+	PendingSnapshot uint64  // 被用于ProgressStateSnapshot状态中
 
 	// RecentActive is true if the progress is recently active. Receiving any messages
 	// from the corresponding follower indicates the progress is active.
@@ -70,7 +70,7 @@ type Progress struct {
 	// into inflights in order.
 	// When a leader receives a reply, the previous inflights should
 	// be freed by calling inflights.freeTo.
-	ins *inflights
+	ins *inflights  // 保存处理中的message（还没有收到follower回复的message）
 }
 
 func (pr *Progress) resetState(state ProgressStateType) {

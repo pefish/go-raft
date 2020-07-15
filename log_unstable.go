@@ -20,12 +20,12 @@ import pb "github.com/pefish/go-raft/raftpb"
 // Note that unstable.offset may be less than the highest log
 // position in storage; this means that the next write to storage
 // might need to truncate the log before persisting unstable.entries.
-type unstable struct {
+type unstable struct {  // 存放所有可能回滚的log entry
 	// the incoming unstable snapshot, if any.
-	snapshot *pb.Snapshot
+	snapshot *pb.Snapshot  // 保存即将要执行的快照
 	// all entries that have not yet been written to storage.
 	entries []pb.Entry
-	offset  uint64
+	offset  uint64  // 表示第一个可能回滚的log entry在log中的索引
 
 	logger Logger
 }
@@ -101,19 +101,19 @@ func (u *unstable) restore(s pb.Snapshot) {
 }
 
 func (u *unstable) truncateAndAppend(ents []pb.Entry) {
-	after := ents[0].Index - 1
+	after := ents[0].Index - 1  // 找到传过来的第一个entry的index-1（传过来的entries是顺序的）
 	switch {
-	case after == u.offset+uint64(len(u.entries))-1:
+	case after == u.offset+uint64(len(u.entries))-1:  // 如果传过来的entry的index刚好是接着最后一个entry的，则直接append他们。如 0 1 2（提交点）  3 4 5 6 7（log结束点） 附加 8 9 变成 0 1 2 3 4 5 6 7 8 9
 		// after is the last index in the u.entries
 		// directly append
 		u.entries = append(u.entries, ents...)
-	case after < u.offset:
+	case after < u.offset:  // 如果第一个entry的index小于提交点+1，则回滚所有后面的entry。 如 0 1 2（提交点）  3 4 5 6 7（log结束点）附加  3 4 变成 0 1 2 3 4
 		u.logger.Infof("replace the unstable entries from index %d", after+1)
 		// The log is being truncated to before our current offset
 		// portion, so set the offset and replace the entries
 		u.offset = after + 1
 		u.entries = ents
-	default:
+	default:   // 0 1 2（提交点）  3 4 5 6 7（log结束点）附加  5 6 变成 0 1 2 3 4 5 6
 		// truncate to after and copy to u.entries
 		// then append
 		u.logger.Infof("truncate the unstable entries to index %d", after)

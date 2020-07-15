@@ -56,13 +56,13 @@ func (st StateType) String() string {
 // Config contains the parameters to start a raft.
 type Config struct {
 	// ID is the identity of the local raft. ID cannot be 0.
-	ID uint64
+	ID uint64  // raft实例的唯一标识
 
 	// peers contains the IDs of all nodes (including self) in the raft cluster. It
 	// should only be set when starting a new raft cluster. Restarting raft from
 	// previous configuration will panic if peers is set. peer is private and only
 	// used for testing right now.
-	peers []uint64
+	peers []uint64  //
 
 	// ElectionTick is the number of Node.Tick invocations that must pass between
 	// elections. That is, if a follower does not receive any message from the
@@ -85,7 +85,7 @@ type Config struct {
 	// raft. raft will not return entries to the application smaller or equal to
 	// Applied. If Applied is unset when restarting, raft might return previous
 	// applied entries. This is a very application dependent configuration.
-	Applied uint64
+	Applied uint64  // 表示应用点
 
 	// MaxSizePerMsg limits the max size of each append message. Smaller value
 	// lowers the raft recovery cost(initial probing and message lost during normal
@@ -140,7 +140,7 @@ func (c *Config) validate() error {
 type raft struct {
 	id uint64
 
-	Term uint64
+	Term uint64  // 当前任期，也可以叫第几回合
 	Vote uint64
 
 	// the log
@@ -148,9 +148,9 @@ type raft struct {
 
 	maxInflight int
 	maxMsgSize  uint64
-	prs         map[uint64]*Progress
+	prs         map[uint64]*Progress  // 保存维护每个邻节点的状态信息，也包括自己
 
-	state StateType
+	state StateType  // 本节点的状态
 
 	votes map[uint64]bool
 
@@ -177,17 +177,17 @@ type raft struct {
 	heartbeatTimeout int
 	electionTimeout  int
 	rand             *rand.Rand
-	tick             func()
-	step             stepFunc
+	tick             func()  // 随从、候选人、领导, 每个角色都有一个相应的定时执行函数，每次更换角色，这个函数都被重新设置
+	step             stepFunc  // 随从、候选人、领导, 每个角色都有一个相应的处理函数，每次更换角色，这个函数都被重新设置
 
 	logger Logger
 }
 
 func newRaft(c *Config) *raft {
-	if err := c.validate(); err != nil {
+	if err := c.validate(); err != nil {  // 验证配置的正确性
 		panic(err.Error())
 	}
-	raftlog := newLog(c.Storage, c.Logger)
+	raftlog := newLog(c.Storage, c.Logger)  // 新建一个log实例
 	hs, cs, err := c.Storage.InitialState()
 	if err != nil {
 		panic(err) // TODO(bdarnell)
@@ -215,19 +215,19 @@ func newRaft(c *Config) *raft {
 		checkQuorum:      c.CheckQuorum,
 	}
 	r.rand = rand.New(rand.NewSource(int64(c.ID)))
-	for _, p := range peers {
+	for _, p := range peers {  // 每个peer初始化一个状态信息
 		r.prs[p] = &Progress{Next: 1, ins: newInflights(r.maxInflight)}
 	}
-	if !isHardStateEqual(hs, emptyState) {
+	if !isHardStateEqual(hs, emptyState) {  // 如果Storage中的初始HardState状态不是空的，则从其中恢复过来
 		r.loadState(hs)
 	}
-	if c.Applied > 0 {
+	if c.Applied > 0 {  // 如果配置了应用点，则设置应用点
 		raftlog.appliedTo(c.Applied)
 	}
-	r.becomeFollower(r.Term, None)
+	r.becomeFollower(r.Term, None)  // 将自己设置为follower
 
 	nodesStrs := make([]string, 0)
-	for _, n := range r.nodes() {
+	for _, n := range r.nodes() {  // 取出所有节点（为了打印）
 		nodesStrs = append(nodesStrs, fmt.Sprintf("%x", n))
 	}
 
@@ -383,7 +383,7 @@ func (r *raft) maybeCommit() bool {
 	return r.raftLog.maybeCommit(mci, r.Term)
 }
 
-func (r *raft) reset(term uint64) {
+func (r *raft) reset(term uint64) {  // 重置raft协议到一个新的任期
 	if r.Term != term {
 		r.Term = term
 		r.Vote = None

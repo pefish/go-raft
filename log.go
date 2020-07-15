@@ -27,15 +27,15 @@ type raftLog struct {
 
 	// unstable contains all unstable entries and snapshot.
 	// they will be saved into storage.
-	unstable unstable
+	unstable unstable  // 记录所有尚未提交的不稳定的entries
 
 	// committed is the highest log position that is known to be in
 	// stable storage on a quorum of nodes.
-	committed uint64
+	committed uint64  // 提交点
 	// applied is the highest log position that the application has
 	// been instructed to apply to its state machine.
 	// Invariant: applied <= committed
-	applied uint64
+	applied uint64  // 应用点
 
 	logger Logger
 }
@@ -136,7 +136,7 @@ func (l *raftLog) unstableEntries() []pb.Entry {
 // nextEnts returns all the available entries for execution.
 // If applied is smaller than the index of snapshot, it returns all committed
 // entries after the index of snapshot.
-func (l *raftLog) nextEnts() (ents []pb.Entry) {
+func (l *raftLog) nextEnts() (ents []pb.Entry) {  // 返回所有的已经提交了的可以apply的entries。如果应用点比快照点还小，则返回快照点后面的所有已提交的
 	off := max(l.applied+1, l.firstIndex())
 	if l.committed+1 > off {
 		ents, err := l.slice(off, l.committed+1, noLimit)
@@ -165,7 +165,7 @@ func (l *raftLog) snapshot() (pb.Snapshot, error) {
 	return l.storage.Snapshot()
 }
 
-func (l *raftLog) firstIndex() uint64 {
+func (l *raftLog) firstIndex() uint64 {  // 返回第一个entry的index+1
 	if i, ok := l.unstable.maybeFirstIndex(); ok {
 		return i
 	}

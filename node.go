@@ -37,7 +37,7 @@ var (
 
 // SoftState provides state that is useful for logging and debugging.
 // The state is volatile and does not need to be persisted to the WAL.
-type SoftState struct {
+type SoftState struct {  // 软状态，表示易变的状态，有leader信息、本节点的角色状态
 	Lead      uint64
 	RaftState StateType
 }
@@ -49,34 +49,34 @@ func (a *SoftState) equal(b *SoftState) bool {
 // Ready encapsulates the entries and messages that are ready to read,
 // be saved to stable storage, committed or sent to other peers.
 // All fields in Ready are read-only.
-type Ready struct {
+type Ready struct {  // 表示准备要读的数据（entries以及messages）
 	// The current volatile state of a Node.
 	// SoftState will be nil if there is no update.
 	// It is not required to consume or store SoftState.
-	*SoftState
+	*SoftState  // 表示本节点的软状态。这里非空就表示Ready包有更新
 
 	// The current state of a Node to be saved to stable storage BEFORE
 	// Messages are sent.
 	// HardState will be equal to empty state if there is no update.
-	pb.HardState
+	pb.HardState  // 表示本节点的硬状态。这里不是空状态就表示Ready包有更新
 
 	// Entries specifies entries to be saved to stable storage BEFORE
 	// Messages are sent.
-	Entries []pb.Entry
+	Entries []pb.Entry  // 表示准备要被提交的entries。这里长度大于0就表示Ready包有更新
 
 	// Snapshot specifies the snapshot to be saved to stable storage.
-	Snapshot pb.Snapshot
+	Snapshot pb.Snapshot  // 表示待执行快照。这里有值就表示Ready包有更新
 
 	// CommittedEntries specifies entries to be committed to a
 	// store/state-machine. These have previously been committed to stable
 	// store.
-	CommittedEntries []pb.Entry
+	CommittedEntries []pb.Entry  // 存储准备要被apply的下一批entries。这里长度大于0就表示Ready包有更新
 
 	// Messages specifies outbound messages to be sent AFTER Entries are
 	// committed to stable storage.
 	// If it contains a MsgSnap message, the application MUST report back to raft
 	// when the snapshot has been received or has failed by calling ReportSnapshot.
-	Messages []pb.Message
+	Messages []pb.Message  // 表示上面的Entries被提交后，需要被发送的所有消息。这里长度大于0就表示Ready包有更新
 }
 
 func isHardStateEqual(a, b pb.HardState) bool {
@@ -93,7 +93,7 @@ func IsEmptySnap(sp pb.Snapshot) bool {
 	return sp.Metadata.Index == 0
 }
 
-func (rd Ready) containsUpdates() bool {
+func (rd Ready) containsUpdates() bool {  // 判断准备处理的包是否包含更新，有更新才被处理，没更新就无需处理。
 	return rd.SoftState != nil || !IsEmptyHardState(rd.HardState) ||
 		!IsEmptySnap(rd.Snapshot) || len(rd.Entries) > 0 ||
 		len(rd.CommittedEntries) > 0 || len(rd.Messages) > 0
@@ -169,11 +169,11 @@ type Peer struct {
 // StartNode returns a new Node given configuration and a list of raft peers.
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
 func StartNode(c *Config, peers []Peer) Node {
-	r := newRaft(c)
+	r := newRaft(c)  // 新建一个raft实例
 	// become the follower at term 1 and apply initial configuration
 	// entries of term 1
-	r.becomeFollower(1, None)
-	for _, peer := range peers {
+	r.becomeFollower(1, None)  // 本节点设置为follower，任期设置为1，leader为空
+	for _, peer := range peers {  // 针对每个node添加一个EntryConfChange类型的entry，append到本节点log中
 		cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
 		d, err := cc.Marshal()
 		if err != nil {
@@ -185,7 +185,7 @@ func StartNode(c *Config, peers []Peer) Node {
 	// Mark these initial entries as committed.
 	// TODO(bdarnell): These entries are still unstable; do we need to preserve
 	// the invariant that committed < unstable?
-	r.raftLog.committed = r.raftLog.lastIndex()
+	r.raftLog.committed = r.raftLog.lastIndex()  // 设置提交点，标记所有初始化的entries为已提交
 	// Now apply them, mainly so that the application can call Campaign
 	// immediately after StartNode in tests. Note that these nodes will
 	// be added to raft twice: here and when the application's Ready
@@ -195,11 +195,11 @@ func StartNode(c *Config, peers []Peer) Node {
 	// entries since they have already been committed).
 	// We do not set raftLog.applied so the application will be able
 	// to observe all conf changes via Ready.CommittedEntries.
-	for _, peer := range peers {
+	for _, peer := range peers {  // 这里立马应用前面的几个EntryConfChange类型的entry，为了测试方便，实际上这几个entry后面还会apply一遍，应为他们被提交了还没有被apply（应用点没有设置）
 		r.addNode(peer.ID)
 	}
 
-	n := newNode()
+	n := newNode()  // 新建一个node实例
 	go n.run(r)
 	return &n
 }
@@ -218,16 +218,16 @@ func RestartNode(c *Config) Node {
 
 // node is the canonical implementation of the Node interface
 type node struct {
-	propc      chan pb.Message
-	recvc      chan pb.Message
-	confc      chan pb.ConfChange
-	confstatec chan pb.ConfState
-	readyc     chan Ready
-	advancec   chan struct{}
+	propc      chan pb.Message  // 赞同（propose）数据append的类型消息的通道
+	recvc      chan pb.Message  // 除 赞同数据append的类型消息 以外所有类型消息的存放通道
+	confc      chan pb.ConfChange  // 配置（这里的配置只是指邻节点的配置）变更消息的通道。由应用层通知配置变更
+	confstatec chan pb.ConfState  // 生效的新配置通道。应用层通知配置变更后会监听这个通道来等待节点响应配置变更消息（节点响应完成后会往这里发送配置）
+	readyc     chan Ready  // Ready包通道。应用层会监听这个通道
+	advancec   chan struct{}  // 通知节点上一个Ready已经处理完毕。由应用层调用node.Advance函数触发
 	tickc      chan struct{}
 	done       chan struct{}
-	stop       chan struct{}
-	status     chan chan Status
+	stop       chan struct{}  // 监听应用层发起的停止节点的请求
+	status     chan chan Status  // 监听应用层发起的获取节点状态的请求
 }
 
 func newNode() node {
@@ -262,28 +262,28 @@ func (n *node) run(r *raft) {
 	var readyc chan Ready
 	var advancec chan struct{}
 	var prevLastUnstablei, prevLastUnstablet uint64
-	var havePrevLastUnstablei bool
+	var havePrevLastUnstablei bool  // 上一个ready包中是否存在待提交的entry
 	var prevSnapi uint64
 	var rd Ready
 
 	lead := None
-	prevSoftSt := r.softState()
-	prevHardSt := emptyState
+	prevSoftSt := r.softState()  // 获取本节点的软状态
+	prevHardSt := emptyState  // ready处理完会更新这个变量
 
-	for {
+	for {  // 进入节点死循环
 		if advancec != nil {
 			readyc = nil
 		} else {
-			rd = newReady(r, prevSoftSt, prevHardSt)
-			if rd.containsUpdates() {
-				readyc = n.readyc
+			rd = newReady(r, prevSoftSt, prevHardSt)  // 新建一个准备处理的包，软状态给它，表示本节点软状态改变
+			if rd.containsUpdates() {  // 判断Ready包是否有更新
+				readyc = n.readyc  // 有更新的话，取出ready包通道，下面会往里塞数据
 			} else {
 				readyc = nil
 			}
 		}
 
-		if lead != r.lead {
-			if r.hasLeader() {
+		if lead != r.lead {  // 如果本节点记录的leader有变化
+			if r.hasLeader() {  // 如果存在leader
 				if lead == None {
 					r.logger.Infof("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
 				} else {
@@ -301,16 +301,16 @@ func (n *node) run(r *raft) {
 		// TODO: maybe buffer the config propose if there exists one (the way
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
-		case m := <-propc:
+		case m := <-propc:  // 收到赞同log append类型的消息
 			m.From = r.id
 			r.Step(m)
-		case m := <-n.recvc:
+		case m := <-n.recvc:  // 收到其他类型消息
 			// filter out response message from unknown From.
 			if _, ok := r.prs[m.From]; ok || !IsResponseMsg(m) {
 				r.Step(m) // raft never returns an error
 			}
-		case cc := <-n.confc:
-			if cc.NodeID == None {
+		case cc := <-n.confc:  // 收到配置变更消息（包括添加node、移除node、更新node三种消息）
+			if cc.NodeID == None {  // 如果要操作的node id都没有，则什么都不做
 				r.resetPendingConf()
 				select {
 				case n.confstatec <- pb.ConfState{Nodes: r.nodes()}:
@@ -319,27 +319,27 @@ func (n *node) run(r *raft) {
 				break
 			}
 			switch cc.Type {
-			case pb.ConfChangeAddNode:
+			case pb.ConfChangeAddNode:  // 添加节点
 				r.addNode(cc.NodeID)
-			case pb.ConfChangeRemoveNode:
+			case pb.ConfChangeRemoveNode:  // 移除节点
 				// block incoming proposal when local node is
 				// removed
 				if cc.NodeID == r.id {
 					n.propc = nil
 				}
 				r.removeNode(cc.NodeID)
-			case pb.ConfChangeUpdateNode:
+			case pb.ConfChangeUpdateNode:  // 更新节点
 				r.resetPendingConf()
 			default:
 				panic("unexpected conf type")
 			}
 			select {
-			case n.confstatec <- pb.ConfState{Nodes: r.nodes()}:
+			case n.confstatec <- pb.ConfState{Nodes: r.nodes()}:  // 发送新的配置通知
 			case <-n.done:
 			}
-		case <-n.tickc:
+		case <-n.tickc:  // 定时处理。由应用层调用node.Tick函数触发这里
 			r.tick()
-		case readyc <- rd:
+		case readyc <- rd:  // 向ready包通道塞入ready包，应用层会处理ready包
 			if rd.SoftState != nil {
 				prevSoftSt = rd.SoftState
 			}
@@ -351,26 +351,26 @@ func (n *node) run(r *raft) {
 			if !IsEmptyHardState(rd.HardState) {
 				prevHardSt = rd.HardState
 			}
-			if !IsEmptySnap(rd.Snapshot) {
+			if !IsEmptySnap(rd.Snapshot) {  // 如果存在待执行快照，则取出快照点
 				prevSnapi = rd.Snapshot.Metadata.Index
 			}
 			r.msgs = nil
-			advancec = n.advancec
-		case <-advancec:
+			advancec = n.advancec  // 开启通道。n.advancec会被应用层通知上一个ready包已处理完
+		case <-advancec:  // 上一个ready包处理结束
 			if prevHardSt.Commit != 0 {
-				r.raftLog.appliedTo(prevHardSt.Commit)
+				r.raftLog.appliedTo(prevHardSt.Commit)  // 设置应用点
 			}
-			if havePrevLastUnstablei {
-				r.raftLog.stableTo(prevLastUnstablei, prevLastUnstablet)
+			if havePrevLastUnstablei {  // 如果上一个已处理的ready包有待提交的entry，则更新不稳定log
+				r.raftLog.stableTo(prevLastUnstablei, prevLastUnstablet)  // 更新不稳定log
 				havePrevLastUnstablei = false
 			}
-			r.raftLog.stableSnapTo(prevSnapi)
-			advancec = nil
-		case c := <-n.status:
-			c <- getStatus(r)
+			r.raftLog.stableSnapTo(prevSnapi)  // 如果上一个ready包中存在待执行快照，那么将不稳定log中的待执行快照设置为空
+			advancec = nil  // 封闭通道
+		case c := <-n.status:  // 收到获取本节点状态的请求
+			c <- getStatus(r)  // 取出状态放入c通道
 		case <-n.stop:
 			close(n.done)
-			return
+			return  // 跳出循环
 		}
 	}
 }
