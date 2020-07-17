@@ -103,7 +103,7 @@ func main() {
 					n.ApplyConfChange(cc)
 				}
 			}
-			//n.Advance()
+			n.Advance()
 		}
 
 	}

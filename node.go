@@ -144,7 +144,7 @@ type Node interface {
 	// n.Advance()
 	// ...
 	//```
-	Advance()
+	Advance()  // 通知raft，应用层已经apply了这个ready包
 	// ApplyConfChange applies config change to the local node.
 	// Returns an opaque ConfState protobuf which must be recorded
 	// in snapshots. Will never return nil; it returns a pointer only
