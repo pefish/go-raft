@@ -92,6 +92,7 @@ func main() {
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				processSnapshot(rd.Snapshot)
 			}
+			raftStorage.Append(rd.Entries)
 			for _, entry := range rd.CommittedEntries {
 				process(entry)
 				if entry.Type == pb.EntryConfChange {
