@@ -166,7 +166,7 @@ type raft struct {
 	// or candidate.
 	// number of ticks since it reached last electionTimeout or received a
 	// valid message from current leader when it is a follower.
-	electionElapsed int
+	electionElapsed int  // 选举已进行了多少个tick。每次大于electionTimeout超时就清空
 
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
@@ -174,10 +174,10 @@ type raft struct {
 
 	checkQuorum bool
 
-	heartbeatTimeout int
-	electionTimeout  int
+	heartbeatTimeout int   // 心跳超时的tick数
+	electionTimeout  int   // 超时而进入新一轮选举的tick数
 	rand             *rand.Rand
-	tick             func()  // 随从、候选人、领导, 每个角色都有一个相应的定时执行函数，每次更换角色，这个函数都被重新设置
+	tick             func()  // 随从（监控超时选举）、候选人（监控超时选举）、领导（发送心跳、检查活跃节点是否依然超过一半）, 每个角色都有一个相应的定时执行函数，每次更换角色，这个函数都被重新设置。
 	step             stepFunc  // 随从、候选人、领导, 每个角色都有一个相应的处理函数，每次更换角色，这个函数都被重新设置
 
 	logger Logger
@@ -417,7 +417,7 @@ func (r *raft) appendEntry(es ...pb.Entry) {
 
 // tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
-	if !r.promotable() {
+	if !r.promotable() {  // 判断自己在不在peers里面（正常情况下应该在）
 		r.electionElapsed = 0
 		return
 	}
@@ -432,7 +432,6 @@ func (r *raft) tickElection() {
 func (r *raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	r.electionElapsed++
-
 	if r.electionElapsed >= r.electionTimeout {
 		r.electionElapsed = 0
 		if r.checkQuorum {
@@ -575,7 +574,7 @@ func stepLeader(r *raft, m pb.Message) {
 		r.bcastHeartbeat()
 		return
 	case pb.MsgCheckQuorum:
-		if !r.checkQuorumActive() {
+		if !r.checkQuorumActive() {  // 检查活跃节点是否依然超过一半，不过半了就将自己从leader变成follower
 			r.logger.Warningf("%x stepped down to follower since quorum is not active", r.id)
 			r.becomeFollower(r.Term, None)
 		}
@@ -872,7 +871,7 @@ func (r *raft) loadState(state pb.HardState) {
 // isElectionTimeout returns true if r.electionElapsed is greater than the
 // randomized election timeout in (electiontimeout, 2 * electiontimeout - 1).
 // Otherwise, it returns false.
-func (r *raft) isElectionTimeout() bool {
+func (r *raft) isElectionTimeout() bool {  // 是否选举超时
 	d := r.electionElapsed - r.electionTimeout
 	if d < 0 {
 		return false
@@ -884,7 +883,7 @@ func (r *raft) isElectionTimeout() bool {
 // the view of the local raft state machine. Otherwise, it returns
 // false.
 // checkQuorumActive also resets all RecentActive to false.
-func (r *raft) checkQuorumActive() bool {
+func (r *raft) checkQuorumActive() bool {  // 检查支持自己的活跃节点有没有超过一半
 	var act int
 
 	for id := range r.prs {

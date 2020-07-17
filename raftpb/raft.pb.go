@@ -70,7 +70,7 @@ func (x *EntryType) UnmarshalJSON(data []byte) error {
 type MessageType int32  // 消息中包含多个entry
 
 const (
-	MsgHup           MessageType = 0
+	MsgHup           MessageType = 0  // follower或者候选人接收leader心跳超时，发送给节点的消息。节点收到这个消息会将自己变成候选人开启一轮选举
 	MsgBeat          MessageType = 1
 	MsgProp          MessageType = 2  // propose append msg
 	MsgApp           MessageType = 3  // append msg

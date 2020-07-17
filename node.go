@@ -17,7 +17,6 @@ package raft
 import (
 	"context"
 	"errors"
-
 	pb "github.com/pefish/go-raft/raftpb"
 )
 
@@ -49,7 +48,7 @@ func (a *SoftState) equal(b *SoftState) bool {
 // Ready encapsulates the entries and messages that are ready to read,
 // be saved to stable storage, committed or sent to other peers.
 // All fields in Ready are read-only.
-type Ready struct {  // 表示准备要读的数据（entries以及messages）
+type Ready struct {  // 表示准备要提交的数据（entries以及messages）。应用层会监听ready包，然后进行处理
 	// The current volatile state of a Node.
 	// SoftState will be nil if there is no update.
 	// It is not required to consume or store SoftState.
@@ -76,7 +75,7 @@ type Ready struct {  // 表示准备要读的数据（entries以及messages）
 	// committed to stable storage.
 	// If it contains a MsgSnap message, the application MUST report back to raft
 	// when the snapshot has been received or has failed by calling ReportSnapshot.
-	Messages []pb.Message  // 表示上面的Entries被提交后，需要被发送的所有消息。这里长度大于0就表示Ready包有更新
+	Messages []pb.Message  // 表示上面的Entries被提交后，需要被发送给邻节点的所有消息。这里长度大于0就表示Ready包有更新
 }
 
 func isHardStateEqual(a, b pb.HardState) bool {
@@ -103,15 +102,15 @@ func (rd Ready) containsUpdates() bool {  // 判断准备处理的包是否包�
 type Node interface {
 	// Tick increments the internal logical clock for the Node by a single tick. Election
 	// timeouts and heartbeat timeouts are in units of ticks.
-	Tick()
+	Tick()  // 应用层定时调用这个函数
 	// Campaign causes the Node to transition to candidate state and start campaigning to become leader.
 	Campaign(ctx context.Context) error
 	// Propose proposes that data be appended to the log.
-	Propose(ctx context.Context, data []byte) error
+	Propose(ctx context.Context, data []byte) error  // 应用层调用这个方法执行命令，命令将被包装成log entry等待共识达成，达成后通过ready通知应用层
 	// ProposeConfChange proposes config change.
 	// At most one ConfChange can be in the process of going through consensus.
 	// Application needs to call ApplyConfChange when applying EntryConfChange type entry.
-	ProposeConfChange(ctx context.Context, cc pb.ConfChange) error
+	ProposeConfChange(ctx context.Context, cc pb.ConfChange) error  // 应用层调用这个方法表示邻节点变更，共识完成后，应用层需要调用ApplyConfChange使其生效
 	// Step advances the state machine using the given message. ctx.Err() will be returned, if any.
 	Step(ctx context.Context, msg pb.Message) error
 
@@ -150,7 +149,7 @@ type Node interface {
 	// Returns an opaque ConfState protobuf which must be recorded
 	// in snapshots. Will never return nil; it returns a pointer only
 	// to match MemoryStorage.Compact.
-	ApplyConfChange(cc pb.ConfChange) *pb.ConfState
+	ApplyConfChange(cc pb.ConfChange) *pb.ConfState  // ready包中有EntryConfChange事件时，应用层需要调用这个函数使配置生效
 	// Status returns the current status of the raft state machine.
 	Status() Status
 	// ReportUnreachable reports the given node is not reachable for the last send.
@@ -339,6 +338,10 @@ func (n *node) run(r *raft) {
 			}
 		case <-n.tickc:  // 定时处理。由应用层调用node.Tick函数触发这里
 			r.tick()
+			r.logger.Debugf("tick... status: %v", r.raftLog.allEntries())
+			r.logger.Debugf("tick... committed: %d", r.raftLog.committed)
+			r.logger.Debugf("tick... applied: %d", r.raftLog.applied)
+			r.logger.Debugf("tick... peers: %d", r.prs)
 		case readyc <- rd:  // 向ready包通道塞入ready包，应用层会处理ready包
 			if rd.SoftState != nil {
 				prevSoftSt = rd.SoftState
