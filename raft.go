@@ -272,7 +272,7 @@ func (r *raft) send(m pb.Message) {
 }
 
 // sendAppend sends RPC, with entries to the given peer.
-func (r *raft) sendAppend(to uint64) {
+func (r *raft) sendAppend(to uint64) {  // 给follower发送它需要的entries（next开始，包含next）
 	pr := r.prs[to]
 	if pr.isPaused() {
 		return
@@ -614,10 +614,10 @@ func stepLeader(r *raft, m pb.Message) {
 		return
 	}
 	switch m.Type {
-	case pb.MsgAppResp:
-		pr.RecentActive = true
+	case pb.MsgAppResp:  // 收到follower的append msg的回复
+		pr.RecentActive = true  // 更新follower的活跃状态
 
-		if m.Reject {
+		if m.Reject {  // 如果follower拒绝append
 			r.logger.Debugf("%x received msgApp rejection(lastindex: %d) from %x for index %d",
 				r.id, m.RejectHint, m.From, m.Index)
 			if pr.maybeDecrTo(m.Index, m.RejectHint) {
@@ -640,8 +640,8 @@ func stepLeader(r *raft, m pb.Message) {
 					pr.ins.freeTo(m.Index)
 				}
 
-				if r.maybeCommit() {
-					r.bcastAppend()
+				if r.maybeCommit() {  // 尝试提交（票数超过一般就能成功提交）
+					r.bcastAppend()  // 向所有follower发送他们需要的entries
 				} else if oldPaused {
 					// update() reset the wait state on this node. If we had delayed sending
 					// an update before, send it now.
@@ -703,14 +703,14 @@ func stepCandidate(r *raft, m pb.Message) {
 		r.logger.Infof("%x [logterm: %d, index: %d, vote: %x] rejected vote from %x [logterm: %d, index: %d] at term %d",
 			r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.From, m.LogTerm, m.Index, r.Term)
 		r.send(pb.Message{To: m.From, Type: pb.MsgVoteResp, Reject: true})
-	case pb.MsgVoteResp:
-		gr := r.poll(m.From, !m.Reject)
+	case pb.MsgVoteResp:  // 收到投票请求的回复
+		gr := r.poll(m.From, !m.Reject)  // 获取赞同票的个数
 		r.logger.Infof("%x [quorum:%d] has received %d votes and %d vote rejections", r.id, r.quorum(), gr, len(r.votes)-gr)
 		switch r.quorum() {
-		case gr:
+		case gr:  // 赞同票超过一半，则成为leader，并立马宣誓主权
 			r.becomeLeader()
 			r.bcastAppend()
-		case len(r.votes) - gr:
+		case len(r.votes) - gr:  // 投票结束，本节点得到的赞同票低于一半，则变成follower
 			r.becomeFollower(r.Term, None)
 		}
 	}
@@ -757,7 +757,7 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 
-	if mlastIndex, ok := r.raftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
+	if mlastIndex, ok := r.raftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {  // 尝试append，需要的话也会commit
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: mlastIndex})
 	} else {
 		r.logger.Debugf("%x [logterm: %d, index: %d] rejected msgApp [logterm: %d, index: %d] from %x",
@@ -871,7 +871,7 @@ func (r *raft) loadState(state pb.HardState) {
 // isElectionTimeout returns true if r.electionElapsed is greater than the
 // randomized election timeout in (electiontimeout, 2 * electiontimeout - 1).
 // Otherwise, it returns false.
-func (r *raft) isElectionTimeout() bool {  // 是否选举超时
+func (r *raft) isElectionTimeout() bool {  // 是否选举超时。超时时间在每个节点上具有随机性
 	d := r.electionElapsed - r.electionTimeout
 	if d < 0 {
 		return false
